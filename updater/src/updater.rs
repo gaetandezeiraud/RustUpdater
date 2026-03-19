@@ -22,7 +22,6 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 use crate::models::{FileEntry, Manifest, RootJson};
-use crate::patchers::HDiff;
 use anyhow::{Context, Result};
 use futures::stream::{self, StreamExt};
 use reqwest::Client;
@@ -31,6 +30,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration};
+use hdiffpatch_rs::patchers::HDiff;
 use tokio::io::AsyncWriteExt;
 
 /// Files larger than this are written to disk via streaming instead of being
