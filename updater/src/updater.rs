@@ -190,15 +190,12 @@ impl ProductUpdater {
         // We only patch if the total patch cost is strictly less than a full download.
         // Also if total_patch_cost is 0, it means no patches exist, so we force a full download.
         if total_patch_cost > 0 && total_patch_cost < full_size {
-            println!("-> Patch cost ({} bytes) is cheaper than full download ({} bytes). Applying sequentially...", total_patch_cost, full_size);
             for manifest in manifests {
-                println!("-> Applying update for version {}...", manifest.version);
                 self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, true, completed_files.clone(), total_files, on_progress.clone()).await?;
                 // Save intermediate version progression in case of unexpected closure
                 Self::save_local_version(&product_dir, &manifest.version)?;
             }
         } else {
-            println!("-> Patch cost ({} bytes) exceeds full download ({} bytes) or patches are missing. Forcing full download...", total_patch_cost, full_size);
             // Apply the final manifest directly with patching disabled to force a fresh download
             self.apply_manifest(product_name, &target_manifest, &product_dir, &temp_dir, false, completed_files, total_files, on_progress).await?;
             Self::save_local_version(&product_dir, target_version)?;
@@ -276,13 +273,10 @@ impl ProductUpdater {
     where
         F: Fn(usize, usize) + Send + Sync + 'static,
     {
-        println!("Fetching manifest to verify {} v{}...", product_name, version);
         let manifest = self.fetch_manifest(product_name, version).await?;
         let product_dir = self.install_dir.join(product_name);
 
         if !product_dir.exists() { return Err(anyhow::anyhow!("Product directory does not exist.")); }
-
-        println!("Verifying {} files. This may take a moment...", manifest.files.len());
 
         let total_files = manifest.files.len();
         let completed_files = Arc::new(AtomicUsize::new(0));
@@ -434,9 +428,6 @@ async fn update_file(
                 }
                 let _ = fs::remove_file(&patch_dest); // Always clean up the patch file
 
-                if !patch_successful {
-                    eprintln!("Patch failed or hash mismatch for {}. Falling back to full download...", rel_path);
-                }
             }
         }
 
@@ -471,8 +462,6 @@ async fn update_file(
                 if attempts >= MAX_RETRIES {
                     return Err(e.context(format!("Failed to update {} after {} attempts", rel_path, MAX_RETRIES)));
                 }
-                eprintln!("Error updating {}: {}. Retrying {}/{}...", rel_path, e, attempts, MAX_RETRIES);
-
                 // Wait 1 second before retrying to give the network a chance to stabilize
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
