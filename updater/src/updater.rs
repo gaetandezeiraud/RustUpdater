@@ -30,7 +30,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration};
 use tokio::io::AsyncWriteExt;
 
 /// Files larger than this are written to disk via streaming instead of being
@@ -120,7 +120,7 @@ impl ProductUpdater {
     where
         F: Fn(usize, usize) + Send + Sync + Clone + 'static,
     {
-        let target_version = update_path.last().unwrap();
+        let target_version = update_path.last().expect("update_path is guaranteed non-empty");
         let target_manifest = self.fetch_manifest(product_name, target_version).await?;
 
         let product_dir = self.install_dir.join(product_name);
@@ -334,9 +334,8 @@ fn file_hash(path: &Path) -> Result<String> {
 }
 
 /// Apply an HDiffPatch binary patch using the native Rust library.
-async fn apply_patch(old_path: PathBuf, patch_path: PathBuf, out_path: PathBuf) -> Result<(i32, Duration)> {
+async fn apply_patch(old_path: PathBuf, patch_path: PathBuf, out_path: PathBuf) -> Result<()> {
     tokio::task::spawn_blocking(move || {
-        let t0 = Instant::now();
         let is_in_place = old_path == out_path;
         let actual_out_path = if is_in_place {
             // Append the tmp_patch, don't remove the existing file extension,
@@ -356,16 +355,16 @@ async fn apply_patch(old_path: PathBuf, patch_path: PathBuf, out_path: PathBuf) 
         let success = patcher.apply();
 
         if success && is_in_place {
-            if let Err(e) = std::fs::rename(&actual_out_path, &out_path) {
-                eprintln!("[apply_patch] Failed to rename temp file over original: {}", e);
-                return Ok((1, t0.elapsed()));
-            }
+            fs::rename(&actual_out_path, &out_path)
+            .with_context(|| format!(
+                "[apply_patch] Failed to rename temp file over original: {:?} -> {:?}",
+                actual_out_path, out_path
+            ))?;
         } else if !success && is_in_place {
-            let _ = std::fs::remove_file(&actual_out_path);
+            fs::remove_file(&actual_out_path)?;
         }
 
-        let ret = if success { 0 } else { 1 };
-        Ok((ret, t0.elapsed()))
+        Ok(())
     }).await.context("Patch task panicked")?
 }
 
@@ -427,8 +426,8 @@ async fn update_file(
 
                 // If download succeeds, try to apply it
                 if download_to(client, &patch_url, &patch_dest, 0).await.is_ok() {
-                    if let Ok((ret, _)) = apply_patch(dest.clone(), patch_dest.clone(), dest.clone()).await {
-                        if ret == 0 && file_hash(&dest).unwrap_or_default() == entry.hash {
+                    if apply_patch(dest.clone(), patch_dest.clone(), dest.clone()).await.is_ok() {
+                        if file_hash(&dest).unwrap_or_default() == entry.hash {
                             patch_successful = true;
                         }
                     }
