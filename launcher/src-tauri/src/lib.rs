@@ -27,6 +27,7 @@ use std::sync::Mutex;
 use tauri::{Emitter, AppHandle};
 use updater::ProductUpdater;
 use serde::Serialize;
+use sysinfo::System;
 
 struct UpdaterConfig {
     server_url: Mutex<String>,
@@ -52,6 +53,35 @@ struct ProductState {
 struct AppStateResponse {
     products: std::collections::BTreeMap<String, ProductState>,
     offline: bool,
+}
+
+/// Checks if a specific executable is currently running
+fn is_process_running(exe_name: &str) -> bool {
+    let mut sys = System::new_all();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    let target_name = exe_name.to_lowercase();
+
+    for process in sys.processes().values() {
+        let process_name = process.name().to_string_lossy().to_lowercase();
+        if process_name == target_name || process_name == format!("{}.exe", target_name) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Helper to read the local manifest and get the exe name
+fn get_local_exe_name(product_dir: &std::path::Path) -> Option<String> {
+    let manifest_path = product_dir.join("manifest.json");
+    if let Ok(data) = std::fs::read_to_string(&manifest_path) {
+        if let Ok(manifest) = serde_json::from_str::<Manifest>(&data) {
+            if !manifest.exe.is_empty() {
+                return Some(manifest.exe);
+            }
+        }
+    }
+    None
 }
 
 /// Validates the server URL, ensuring it ends with '/'
@@ -121,6 +151,14 @@ async fn run_update(
 ) -> Result<String, String> {
     let url = state.server_url.lock().unwrap().clone();
     let dir = state.install_dir.lock().unwrap().clone();
+    let product_dir = dir.join(&product_name);
+
+    // Is running?
+    if let Some(exe_name) = get_local_exe_name(&product_dir) {
+        if is_process_running(&exe_name) {
+            return Err(format!("Cannot update: {} is currently running. Please close it first.", product_name));
+        }
+    }
 
     let updater = ProductUpdater::new(&url, dir);
     let _ = app.emit("log", format!("Starting update for {} to v{}...", product_name, target_version));
@@ -243,12 +281,53 @@ async fn uninstall_product(
     let install_dir = state.install_dir.lock().unwrap().clone();
     let product_dir = install_dir.join(&product_name);
 
+    // Is running?
+    if let Some(exe_name) = get_local_exe_name(&product_dir) {
+        if is_process_running(&exe_name) {
+            return Err(format!("Cannot uninstall: {} is currently running. Please close it first.", product_name));
+        }
+    }
+
     if product_dir.exists() {
         std::fs::remove_dir_all(&product_dir)
             .map_err(|e| format!("Failed to uninstall directory: {}", e))?;
         Ok("Uninstalled successfully".into())
     } else {
         Err("Product is not installed".into())
+    }
+}
+
+/// Kill a process
+#[tauri::command]
+async fn force_kill_product(
+    state: tauri::State<'_, UpdaterConfig>,
+    product_name: String,
+) -> Result<String, String> {
+    let dir = state.install_dir.lock().unwrap().clone();
+    let product_dir = dir.join(&product_name);
+
+    let exe_name = get_local_exe_name(&product_dir)
+        .ok_or_else(|| "Could not find manifest to determine executable name.".to_string())?;
+
+    let mut sys = System::new_all();
+    sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+
+    let target_name = exe_name.to_lowercase();
+    let mut killed_any = false;
+
+    for process in sys.processes().values() {
+        let process_name = process.name().to_string_lossy().to_lowercase();
+        if process_name == target_name || process_name == format!("{}.exe", target_name) {
+            if process.kill() {
+                killed_any = true;
+            }
+        }
+    }
+
+    if killed_any {
+        Ok("Process killed successfully".into())
+    } else {
+        Err("Could not find or kill the process (it might have already closed).".into())
     }
 }
 
@@ -270,7 +349,8 @@ pub fn run() {
             run_update,
             verify_integrity,
             launch_product,
-            uninstall_product
+            uninstall_product,
+            force_kill_product
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

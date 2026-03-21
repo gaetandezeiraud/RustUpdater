@@ -80,40 +80,60 @@ async function selectProduct(name: string) {
 async function updateProduct() {
   isBusy.value = true;
   currentTaskName.value = 'Downloading & Applying Updates';
-  progressData.value = { current: 0, total: 0, percent: 0 }; // Reset progress
+  progressData.value = { current: 0, total: 0, percent: 0 };
   logs.value.push(`--- Starting Update for ${selectedProductName.value} ---`);
 
-  try {
-    // No longer passing serverUrl
-    await invoke('run_update', {
-      productName: selectedProductName.value,
-      targetVersion: targetInstallVersion.value || selectedProductData.value.latest_version,
-      availableVersions: selectedProductData.value.versions
-    });
-    progressData.value.percent = 100;
-    await refreshData();
-  } catch (err: any) {
-    const errorString = String(err);
+  let success = false;
 
-    // Check if the error is our custom disk space error from Rust
-    if (errorString.includes("INSUFFICIENT_SPACE")) {
-      const parts = errorString.split(":");
-      const reqBytes = parseInt(parts[1]);
-      const availBytes = parseInt(parts[2]);
+  while (!success) {
+    try {
+      await invoke('run_update', {
+        productName: selectedProductName.value,
+        targetVersion: targetInstallVersion.value || selectedProductData.value.latest_version,
+        availableVersions: selectedProductData.value.versions
+      });
+      progressData.value.percent = 100;
+      await refreshData();
+      success = true;
+    } catch (err: any) {
+      const errorString = String(err);
 
-      const reqGb = (reqBytes / 1024 / 1024 / 1024).toFixed(2);
-      const availGb = (availBytes / 1024 / 1024 / 1024).toFixed(2);
-
-      const msg = `Not enough disk space! You need at least ${reqGb} GB, but only have ${availGb} GB available.`;
-      alert(msg);
-      logs.value.push(`CRITICAL ERROR: ${msg}`);
-    } else {
-      // It was a normal download/network error
-      logs.value.push(`ERROR: ${errorString}`);
+      if (errorString.includes("currently running")) {
+        if (confirm(`${selectedProductName.value} is currently running.\n\nDo you want to force close it to continue the update?`)) {
+          logs.value.push('Attempting to force kill the process...');
+          try {
+            await invoke('force_kill_product', { productName: selectedProductName.value });
+            logs.value.push('Process killed. Resuming update...');
+            // Wait 1 second to give Windows time to release the file locks
+            await new Promise(r => setTimeout(r, 1000));
+            // Jump back to the top of the loop and try the update again!
+          } catch (killErr) {
+            logs.value.push(`Failed to kill process: ${killErr}`);
+            alert(`Could not close the application automatically. Please close it manually.`);
+            break;
+          }
+        } else {
+          logs.value.push('Update cancelled by user (application running).');
+          break; // User declined
+        }
+      } else if (errorString.includes("INSUFFICIENT_SPACE")) {
+        // Handle disk space error
+        const parts = errorString.split(":");
+        const reqGb = (parseInt(parts[1]) / 1024 / 1024 / 1024).toFixed(2);
+        const availGb = (parseInt(parts[2]) / 1024 / 1024 / 1024).toFixed(2);
+        const msg = `Not enough disk space! You need at least ${reqGb} GB, but only have ${availGb} GB available.`;
+        alert(msg);
+        logs.value.push(`CRITICAL ERROR: ${msg}`);
+        break;
+      } else {
+        logs.value.push(`ERROR: ${errorString}`);
+        alert(`Update failed: ${errorString}`);
+        break;
+      }
     }
-  } finally {
-    setTimeout(() => { isBusy.value = false; }, 1000);
   }
+
+  setTimeout(() => { isBusy.value = false; }, 1000);
 }
 
 async function launchApp() {
@@ -162,19 +182,48 @@ async function verifyFiles() {
 async function uninstallProduct() {
   if (!confirm(`Are you sure you want to uninstall ${selectedProductName.value}?`)) return;
 
+  isBusy.value = true;
   currentTaskName.value = 'Uninstalling Product';
+  progressData.value = { current: 0, total: 0, percent: 100 };
   logs.value.push(`--- Uninstalling ${selectedProductName.value} ---`);
 
-  try {
-    await invoke('uninstall_product', {
-      productName: selectedProductName.value,
-    });
-    logs.value.push(`${selectedProductName.value} was successfully uninstalled.`);
-    await refreshData();
-  } catch (err: any) {
-    logs.value.push(`ERROR: ${err}`);
-    alert(`Failed to uninstall: ${err}`);
+  let success = false;
+
+  while (!success) {
+    try {
+      await invoke('uninstall_product', {
+        productName: selectedProductName.value,
+      });
+      logs.value.push(`${selectedProductName.value} uninstalled.`);
+      await refreshData();
+      success = true;
+    } catch (err: any) {
+      const errorString = String(err);
+
+      if (errorString.includes("currently running")) {
+        if (confirm(`${selectedProductName.value} is currently running.\n\nDo you want to force close it to continue uninstalling?`)) {
+          logs.value.push('Attempting to force kill the process...');
+          try {
+            await invoke('force_kill_product', { productName: selectedProductName.value });
+            logs.value.push('Process killed. Resuming uninstall...');
+            await new Promise(r => setTimeout(r, 1000));
+            // loopback, try the uninstall again
+          } catch (killErr) {
+            alert(`Could not close the application automatically. Please close it manually.`);
+            break;
+          }
+        } else {
+          logs.value.push('Uninstall cancelled by user (application running).');
+          break;
+        }
+      } else {
+        alert(`Failed to uninstall: ${errorString}`);
+        break;
+      }
+    }
   }
+
+  isBusy.value = false;
 }
 </script>
 
