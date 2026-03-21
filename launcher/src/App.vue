@@ -5,7 +5,6 @@ import { listen } from '@tauri-apps/api/event';
 
 // Shadcn Components
 import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -145,6 +144,26 @@ async function verifyFiles() {
     setTimeout(() => { isBusy.value = false; }, 1000);
   }
 }
+
+async function uninstallProduct() {
+  if (!confirm(`Are you sure you want to uninstall ${selectedProductName.value}?`)) return;
+
+  currentTaskName.value = 'Uninstalling Product';
+  logs.value.push(`--- Uninstalling ${selectedProductName.value} ---`);
+
+  try {
+    await invoke('uninstall_product', {
+      productName: selectedProductName.value,
+    });
+    logs.value.push(`${selectedProductName.value} was successfully uninstalled.`);
+
+    // Clear the local version to update the UI back to the "Install" state
+    localVersion.value = null;
+  } catch (err: any) {
+    logs.value.push(`ERROR: ${err}`);
+    alert(`Failed to uninstall: ${err}`);
+  }
+}
 </script>
 
 <template>
@@ -242,6 +261,9 @@ async function verifyFiles() {
                 </Button>
                 <Button variant="secondary" @click="verifyFiles" :disabled="isBusy" size="lg" class="h-12">
                   Verify
+                </Button>
+                <Button variant="destructive" @click="uninstallProduct" :disabled="isBusy" size="lg" class="h-12">
+                  Uninstall
                 </Button>
               </div>
             </div>

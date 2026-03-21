@@ -178,9 +178,26 @@ async fn launch_product(
     Ok("Launched successfully!".into())
 }
 
+#[tauri::command]
+async fn uninstall_product(
+    state: tauri::State<'_, UpdaterConfig>,
+    product_name: String,
+) -> Result<String, String> {
+    let install_dir = state.install_dir.lock().unwrap().clone();
+    let product_dir = install_dir.join(&product_name);
+
+    if product_dir.exists() {
+        std::fs::remove_dir_all(&product_dir)
+            .map_err(|e| format!("Failed to uninstall directory: {}", e))?;
+        Ok("Uninstalled successfully".into())
+    } else {
+        Err("Product is not installed".into())
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    let default_url = "https://your-server.com/".to_string();
+    let default_url = "http://192.168.1.29:3000/".to_string();
     let default_install_dir = std::env::current_dir().unwrap().join("products");
 
     tauri::Builder::default()
@@ -195,7 +212,8 @@ pub fn run() {
             get_local_version,
             run_update,
             verify_integrity,
-            launch_product
+            launch_product,
+            uninstall_product
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
