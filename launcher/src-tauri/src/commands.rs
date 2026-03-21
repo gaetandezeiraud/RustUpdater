@@ -74,6 +74,12 @@ pub(crate) async fn run_update(
 
     match updater.perform_update(&product_name, &target_version, &available_versions, progress_callback).await {
         Ok(_) => {
+            // Create Windows registry entries and shortcuts
+            if let Some(exe_name) = get_local_exe_name(&product_dir) {
+                crate::process::add_windows_registry(&product_name, &product_dir, &exe_name, &target_version);
+                crate::process::create_start_menu_shortcut(&product_name, &product_dir, &exe_name);
+            }
+
             let _ = app.emit("log", "Update finished successfully!".to_string());
             Ok("Success".into())
         }
@@ -187,6 +193,10 @@ pub(crate) async fn uninstall_product(
         }
     }
 
+    // Clean up Windows registry and shortcuts
+    crate::process::remove_windows_registry(&product_name);
+    crate::process::remove_start_menu_shortcut(&product_name);
+
     if product_dir.exists() {
         std::fs::remove_dir_all(&product_dir)
             .map_err(|e| format!("Failed to uninstall directory: {}", e))?;
@@ -213,4 +223,17 @@ pub(crate) async fn force_kill_product(
     } else {
         Err("Could not find or kill the process (it might have already closed).".into())
     }
+}
+
+/// Look at startup params
+#[tauri::command]
+pub(crate) fn get_startup_intent() -> Option<String> {
+    let args: Vec<String> = std::env::args().collect();
+
+    if let Some(index) = args.iter().position(|arg| arg == "--uninstall") {
+        if index + 1 < args.len() {
+            return Some(args[index + 1].clone());
+        }
+    }
+    None
 }

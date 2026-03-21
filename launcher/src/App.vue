@@ -25,6 +25,13 @@ const progressData = ref({ current: 0, total: 0, percent: 0 });
 const showLogsModal = ref(false);
 const logs = ref<string[]>([]);
 
+async function processUninstallIntent(intent: string | null) {
+  if (intent && products.value[intent]) {
+    await selectProduct(intent);
+    uninstallProduct();
+  }
+}
+
 onMounted(async () => {
   // Listen for logs emitted
   await listen<string>('log', (event) => {
@@ -52,8 +59,21 @@ onMounted(async () => {
     console.warn("No local cache found yet.");
   }
 
+  // Listen for uninstall intents
+  await listen<string>('uninstall-intent', async (event) => {
+    processUninstallIntent(event.payload);
+  });
+
   // Automatically fetch data on startup since Rust handles the URL now
   await refreshData();
+
+  // Cold start, doesn't use the event to avoid race condition at first start-up
+  try {
+    const intent: string | null = await invoke('get_startup_intent');
+    await processUninstallIntent(intent);
+  } catch (err) {
+    console.warn("Failed to check startup intent", err);
+  }
 });
 
 async function refreshData() {

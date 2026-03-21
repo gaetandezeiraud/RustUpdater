@@ -28,19 +28,46 @@ pub mod commands;
 use std::sync::Mutex;
 use state::UpdaterConfig;
 use commands::*;
+use tauri::{Manager, Emitter};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let default_url = "http://192.168.1.29:3000/".to_string();
-    let default_install_dir = std::env::current_dir().unwrap().join("products");
+    let mut default_install_dir = std::env::current_dir().unwrap().join("products");
+
+    // Intercept the hidden --dir argument from Windows Add/Remove programs
+    // Useful only if default_install_dir is relative and not absolute
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(index) = args.iter().position(|arg| arg == "--dir") {
+        if let Some(dir_path) = args.get(index + 1) {
+            default_install_dir = std::path::PathBuf::from(dir_path);
+        }
+    }
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Bring the existing launcher window to the front
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+
+            // Check if the second instance was trying to uninstall something
+            if let Some(index) = args.iter().position(|arg| arg == "--uninstall") {
+                if index + 1 < args.len() {
+                    let product_name = &args[index + 1];
+                    let _ = app.emit("uninstall-intent", product_name);
+                }
+            }
+        }))
         .manage(UpdaterConfig {
             server_url: Mutex::new(default_url),
             install_dir: Mutex::new(default_install_dir),
         })
         .invoke_handler(tauri::generate_handler![
+            get_startup_intent,
             validate_server_url,
             get_cached_app_state,
             get_app_state,

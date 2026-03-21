@@ -1,4 +1,6 @@
+use std::path::Path;
 use std::thread;
+use std::env;
 use std::time::Duration;
 use sysinfo::System;
 use updater::models::Manifest;
@@ -57,4 +59,81 @@ pub(crate) fn kill_process(exe_name: &str) -> bool
     }
 
     killed_any
+}
+
+// Windows features
+pub(crate) fn add_windows_registry(product_name: &str, product_dir: &Path, exe_name: &str, version: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let path = format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}", product_name);
+
+        if let Ok((key, _)) = hkcu.create_subkey(&path) {
+            if let Ok(launcher_exe) = env::current_exe() {
+                let base_dir = product_dir.parent().unwrap_or(product_dir);
+                let uninstall_string = format!("\"{}\" --uninstall \"{}\" --dir \"{}\"",
+                                               launcher_exe.display(),
+                                               product_name,
+                                               base_dir.display()
+                );
+
+                let exe_path = product_dir.join(exe_name);
+
+                let _ = key.set_value("DisplayName", &product_name);
+                let _ = key.set_value("DisplayVersion", &version);
+                let _ = key.set_value("InstallLocation", &product_dir.to_string_lossy().into_owned());
+                let _ = key.set_value("DisplayIcon", &exe_path.to_string_lossy().into_owned());
+                let _ = key.set_value("UninstallString", &uninstall_string);
+                let _ = key.set_value("Publisher", &"EDITOR"); // Todo: Adapt for your use case
+            }
+        }
+    }
+}
+
+pub(crate) fn remove_windows_registry(product_name: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        use winreg::enums::*;
+        use winreg::RegKey;
+
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let path = format!("Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\{}", product_name);
+        let _ = hkcu.delete_subkey_all(&path);
+    }
+}
+
+pub(crate) fn create_start_menu_shortcut(product_name: &str, product_dir: &Path, exe_name: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        // dirs::data_dir() resolves to AppData\Roaming, where the Start Menu lives
+        if let Some(mut start_menu) = dirs::data_dir() {
+            start_menu.push("Microsoft\\Windows\\Start Menu\\Programs");
+            if start_menu.exists() {
+                let shortcut_path = start_menu.join(format!("{}.lnk", product_name));
+                let target = product_dir.join(exe_name);
+
+                let _ = mslnk::ShellLink::new(target.to_string_lossy().as_ref())
+                    .and_then(|mut lnk| {
+                        lnk.set_working_dir(Some(product_dir.to_string_lossy().into_owned()));
+                        lnk.create_lnk(&shortcut_path)
+                    });
+            }
+        }
+    }
+}
+
+pub(crate) fn remove_start_menu_shortcut(product_name: &str) {
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(mut start_menu) = dirs::data_dir() {
+            start_menu.push("Microsoft\\Windows\\Start Menu\\Programs");
+            let shortcut_path = start_menu.join(format!("{}.lnk", product_name));
+            if shortcut_path.exists() {
+                let _ = std::fs::remove_file(shortcut_path);
+            }
+        }
+    }
 }
