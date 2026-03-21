@@ -22,12 +22,12 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct RootJson {
     #[serde(default)]
-    pub products: HashMap<String, ProductEntry>,
+    pub products: BTreeMap<String, ProductEntry>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

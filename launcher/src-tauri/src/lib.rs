@@ -21,7 +21,6 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
-use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
@@ -49,6 +48,12 @@ struct ProductState {
     local_version: Option<String>,
 }
 
+#[derive(Serialize)]
+struct AppStateResponse {
+    products: std::collections::BTreeMap<String, ProductState>,
+    offline: bool,
+}
+
 /// Validates the server URL, ensuring it ends with '/'
 #[tauri::command]
 fn validate_server_url(mut url: String) -> Result<String, String> {
@@ -64,23 +69,13 @@ fn validate_server_url(mut url: String) -> Result<String, String> {
     Ok(url)
 }
 
-#[tauri::command]
-async fn get_app_state(state: tauri::State<'_, UpdaterConfig>) -> Result<HashMap<String, ProductState>, String> {
-    let url = state.server_url.lock().unwrap().clone();
-    let dir = state.install_dir.lock().unwrap().clone();
+fn build_app_state_response(updater: &ProductUpdater, root: RootJson, is_offline: bool) -> AppStateResponse {
+    let mut products_state = std::collections::BTreeMap::new();
 
-    let updater = ProductUpdater::new(&url, dir);
-
-    // Fetch the remote list
-    let root = updater.fetch_root().await.map_err(|e| e.to_string())?;
-
-    let mut app_state = HashMap::new();
-
-    // Merge remote data with local disk data
     for (name, entry) in root.products {
         let local_ver = updater.get_local_version(&name);
 
-        app_state.insert(name, ProductState {
+        products_state.insert(name, ProductState {
             latest_version: entry.latest_version,
             manifest: entry.manifest,
             versions: entry.versions,
@@ -88,7 +83,32 @@ async fn get_app_state(state: tauri::State<'_, UpdaterConfig>) -> Result<HashMap
         });
     }
 
-    Ok(app_state)
+    AppStateResponse {
+        products: products_state,
+        offline: is_offline,
+    }
+}
+
+#[tauri::command]
+async fn get_cached_app_state(state: tauri::State<'_, UpdaterConfig>) -> Result<AppStateResponse, String> {
+    let url = state.server_url.lock().unwrap().clone();
+    let dir = state.install_dir.lock().unwrap().clone();
+
+    let updater = ProductUpdater::new(&url, dir);
+    let root = updater.get_cached_root();
+
+    Ok(build_app_state_response(&updater, root, true))
+}
+
+#[tauri::command]
+async fn get_app_state(state: tauri::State<'_, UpdaterConfig>) -> Result<AppStateResponse, String> {
+    let url = state.server_url.lock().unwrap().clone();
+    let dir = state.install_dir.lock().unwrap().clone();
+
+    let updater = ProductUpdater::new(&url, dir);
+    let (root, is_offline) = updater.fetch_root().await.map_err(|e| e.to_string())?;
+
+    Ok(build_app_state_response(&updater, root, is_offline))
 }
 
 #[tauri::command]
@@ -159,6 +179,8 @@ async fn verify_integrity(
     }
 }
 
+use updater::models::{Manifest, RootJson}; // Make sure you have this import at the top
+
 #[tauri::command]
 async fn launch_product(
     state: tauri::State<'_, UpdaterConfig>,
@@ -166,22 +188,40 @@ async fn launch_product(
 ) -> Result<String, String> {
     let url = state.server_url.lock().unwrap().clone();
     let dir = state.install_dir.lock().unwrap().clone();
+    let product_dir = dir.join(&product_name);
+    let manifest_path = product_dir.join("manifest.json");
 
     let updater = ProductUpdater::new(&url, &dir);
 
     let local_ver = updater.get_local_version(&product_name)
-        .ok_or("Product is not installed.")?;
+        .ok_or("Product is not installed (version.json missing).")?;
 
-    let manifest = updater.fetch_manifest(&product_name, &local_ver).await
-        .map_err(|e| format!("Failed to read manifest: {}", e))?;
+    let manifest = if manifest_path.exists() {
+        // Read the local manifest instantly
+        let manifest_data = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("Failed to read local manifest: {}", e))?;
+        let local_manifest: Manifest = serde_json::from_str(&manifest_data)
+            .map_err(|e| format!("Failed to parse local manifest: {}", e))?;
+
+        local_manifest
+    } else {
+        // Missing local manifest, fetch it, block the launch, and save it
+        let fetched_manifest = updater.fetch_manifest(&product_name, &local_ver).await
+            .map_err(|e| format!("Offline manifest missing, and failed to fetch from server: {}", e))?;
+
+        if let Ok(manifest_json) = serde_json::to_string_pretty(&fetched_manifest) {
+            let _ = std::fs::write(&manifest_path, manifest_json);
+        }
+
+        fetched_manifest
+    };
 
     if manifest.exe.is_empty() {
-        return Err("No executable specified in the server manifest.".into());
+        return Err("No executable specified in the manifest.".into());
     }
 
-    let exe_path = dir
-        .join(&product_name)
-        .join(&manifest.exe);
+    // Launch the executable
+    let exe_path = product_dir.join(&manifest.exe);
 
     if !exe_path.exists() {
         return Err(format!("Executable not found at: {}", exe_path.display()));
@@ -225,6 +265,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             validate_server_url,
+            get_cached_app_state,
             get_app_state,
             run_update,
             verify_integrity,

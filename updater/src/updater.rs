@@ -56,9 +56,35 @@ impl ProductUpdater {
     }
 
     /// Fetch the server's root manifest listing all available products.
-    pub async fn fetch_root(&self) -> Result<RootJson> {
+    pub async fn fetch_root(&self) -> Result<(RootJson, bool)> {
         let url = format!("{}root.json", self.base_url);
-        self.client.get(&url).send().await?.json().await.context("Failed to parse root.json")
+        let cache_path = self.install_dir.join("root_cache.json");
+
+        let _ = fs::create_dir_all(&self.install_dir);
+
+        match self.client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => {
+                if let Ok(json) = response.json::<RootJson>().await {
+                    // Save to cache for future offline use
+                    if let Ok(str_data) = serde_json::to_string_pretty(&json) {
+                        let _ = fs::write(&cache_path, str_data);
+                    }
+                    return Ok((json, false)); // false = not offline
+                }
+            }
+            _ => {} // Network failed or non-200 status, fall through to cache
+        }
+
+        // Fallback to cache
+        if cache_path.exists() {
+            if let Ok(data) = fs::read_to_string(&cache_path) {
+                if let Ok(json) = serde_json::from_str::<RootJson>(&data) {
+                    return Ok((json, true)); // true = offline mode active
+                }
+            }
+        }
+
+        Err(anyhow::anyhow!("Failed to fetch root.json from server and no local cache is available."))
     }
 
     /// Read the locally installed version for a product, if any.
@@ -73,6 +99,17 @@ impl ProductUpdater {
     pub async fn fetch_manifest(&self, product_name: &str, version: &str) -> Result<Manifest> {
         let url = format!("{}products/{}/{}/manifest.json", self.base_url, product_name, version);
         self.client.get(&url).send().await?.json().await.context("Failed to parse manifest.json")
+    }
+
+    /// Instantly read the cached root manifest from disk, if it exists.
+    pub fn get_cached_root(&self) -> RootJson {
+        let cache_path = self.install_dir.join("root_cache.json");
+        if let Ok(data) = fs::read_to_string(&cache_path) {
+            if let Ok(json) = serde_json::from_str::<RootJson>(&data) {
+                return json;
+            }
+        }
+        RootJson::default() // Return empty if no cache exists, at very first launch
     }
 
     /// Initiates an update to a specific target version.
@@ -194,11 +231,13 @@ impl ProductUpdater {
                 self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, true, completed_files.clone(), total_files, on_progress.clone()).await?;
                 // Save intermediate version progression in case of unexpected closure
                 Self::save_local_version(&product_dir, &manifest.version)?;
+                Self::save_local_manifest(&product_dir, &manifest)?;
             }
         } else {
             // Apply the final manifest directly with patching disabled to force a fresh download
             self.apply_manifest(product_name, &target_manifest, &product_dir, &temp_dir, false, completed_files, total_files, on_progress).await?;
             Self::save_local_version(&product_dir, target_version)?;
+            Self::save_local_manifest(&product_dir, &target_manifest)?;
         }
 
         let _ = fs::remove_dir_all(&temp_dir);
@@ -265,6 +304,12 @@ impl ProductUpdater {
     fn save_local_version(product_dir: &Path, version: &str) -> Result<()> {
         let version_json = serde_json::to_string_pretty(&serde_json::json!({ "version": version }))?;
         fs::write(product_dir.join("version.json"), version_json).context("Failed to write version.json")?;
+        Ok(())
+    }
+
+    fn save_local_manifest(product_dir: &Path, manifest: &Manifest) -> Result<()> {
+        let manifest_json = serde_json::to_string_pretty(manifest)?;
+        fs::write(product_dir.join("manifest.json"), manifest_json).context("Failed to write manifest.json")?;
         Ok(())
     }
 

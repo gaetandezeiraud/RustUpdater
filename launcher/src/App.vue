@@ -17,6 +17,7 @@ const selectedProductName = ref('');
 const selectedProductData = ref<any>(null);
 const targetInstallVersion = ref('');
 
+const isOffline = ref(false);
 const isBusy = ref(false);
 const currentTaskName = ref('');
 const progressData = ref({ current: 0, total: 0, percent: 0 });
@@ -35,6 +36,22 @@ onMounted(async () => {
     progressData.value = event.payload;
   });
 
+  // Load local cache
+  try {
+    const cachedState: any = await invoke('get_cached_app_state');
+    if (cachedState && Object.keys(cachedState.products).length > 0) {
+      products.value = cachedState.products;
+      isOffline.value = false;
+
+      const firstProduct = Object.keys(products.value)[0];
+      if (firstProduct && !selectedProductName.value) {
+        await selectProduct(firstProduct);
+      }
+    }
+  } catch (err) {
+    console.warn("No local cache found yet.");
+  }
+
   // Automatically fetch data on startup since Rust handles the URL now
   await refreshData();
 });
@@ -42,7 +59,8 @@ onMounted(async () => {
 async function refreshData() {
   try {
     const state: any = await invoke('get_app_state');
-    products.value = state || {};
+    products.value = state.products || {};
+    isOffline.value = state.offline;
 
     // Re-select the current product to update its UI state if one is selected
     if (selectedProductName.value) {
@@ -161,126 +179,132 @@ async function uninstallProduct() {
 </script>
 
 <template>
-  <div class="flex h-screen w-screen bg-background text-foreground font-sans overflow-hidden">
+  <div class="flex flex-col h-screen w-screen bg-background text-foreground font-sans overflow-hidden">
 
-    <aside class="w-64 bg-card p-4 flex flex-col border-r border-border">
-      <h1 class="text-xl font-bold mb-6 text-primary">Launcher</h1>
+    <div v-if="isOffline" class="bg-destructive text-destructive-foreground text-center py-2 text-sm font-bold w-full z-50 shadow-md">
+      Offline Mode: Server unreachable. You can only launch or uninstall existing applications.
+    </div>
 
-      <div v-if="Object.keys(products).length === 0" class="text-muted-foreground text-sm">
-        No products found.
-      </div>
+    <div class="flex flex-1 overflow-hidden">
+      <aside class="w-64 bg-card p-4 flex flex-col border-r border-border">
+        <h1 class="text-xl font-bold mb-6 text-primary">Launcher</h1>
 
-      <div class="flex flex-col gap-2 flex-1 overflow-y-auto">
-        <Button
-            v-for="(entry, name) in products"
-            :key="name"
-            :variant="selectedProductName === name ? 'default' : 'ghost'"
-            class="justify-start w-full"
-            @click="selectProduct(String(name))"
-        >
-          {{ name }}
-        </Button>
-      </div>
+        <div v-if="Object.keys(products).length === 0" class="text-muted-foreground text-sm">
+          No products found.
+        </div>
 
-      <div class="mt-auto flex flex-col gap-2 pt-4 border-t border-border">
-        <Button variant="secondary" @click="showLogsModal = true">
-          View Logs
-        </Button>
-        <Button variant="outline" @click="refreshData">
-          Refresh Data
-        </Button>
-      </div>
-    </aside>
+        <div class="flex flex-col gap-2 flex-1 overflow-y-auto">
+          <Button
+              v-for="(entry, name) in products"
+              :key="name"
+              :variant="selectedProductName === name ? 'default' : 'ghost'"
+              class="justify-start w-full"
+              @click="selectProduct(String(name))"
+          >
+            {{ name }}
+          </Button>
+        </div>
 
-    <main class="flex-1 p-8 overflow-y-auto bg-muted/20">
-      <Card v-if="selectedProductName" class="max-w-3xl mx-auto shadow-lg">
-        <CardHeader>
-          <CardTitle class="text-3xl">{{ selectedProductName }}</CardTitle>
-          <CardDescription>Manage your installation and updates.</CardDescription>
-        </CardHeader>
+        <div class="mt-auto flex flex-col gap-2 pt-4 border-t border-border">
+          <Button variant="secondary" @click="showLogsModal = true">
+            View Logs
+          </Button>
+          <Button variant="outline" @click="refreshData">
+            Refresh Data
+          </Button>
+        </div>
+      </aside>
 
-        <CardContent>
-          <div class="flex gap-8 mb-6 text-sm">
-            <div class="flex flex-col">
-              <span class="text-muted-foreground">Local Version</span>
-              <span class="font-mono font-medium text-lg">{{ selectedProductData.local_version || 'Not Installed' }}</span>
-            </div>
-            <div class="flex flex-col">
-              <span class="text-muted-foreground">Latest Version</span>
-              <span class="font-mono font-medium text-lg text-primary">{{ selectedProductData.latest_version }}</span>
-            </div>
-          </div>
+      <main class="flex-1 p-8 overflow-y-auto bg-muted/20">
+        <Card v-if="selectedProductName" class="max-w-3xl mx-auto shadow-lg">
+          <CardHeader>
+            <CardTitle class="text-3xl">{{ selectedProductName }}</CardTitle>
+            <CardDescription>Manage your installation and updates.</CardDescription>
+          </CardHeader>
 
-          <div class="space-y-4 pt-6 border-t border-border">
-
-            <div v-if="!selectedProductData.local_version" class="flex items-center gap-4">
-              <Select v-model="targetInstallVersion">
-                <SelectTrigger class="w-[180px]">
-                  <SelectValue placeholder="Select version" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    <SelectItem v-for="v in selectedProductData.versions" :key="v" :value="v">
-                      Install v{{ v }}
-                    </SelectItem>
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
-
-              <Button @click="updateProduct" :disabled="isBusy" size="lg">
-                Install Product
-              </Button>
+          <CardContent>
+            <div class="flex gap-8 mb-6 text-sm">
+              <div class="flex flex-col">
+                <span class="text-muted-foreground">Local Version</span>
+                <span class="font-mono font-medium text-lg">{{ selectedProductData.local_version || 'Not Installed' }}</span>
+              </div>
+              <div class="flex flex-col">
+                <span class="text-muted-foreground">Latest Version</span>
+                <span class="font-mono font-medium text-lg text-primary">{{ selectedProductData.latest_version }}</span>
+              </div>
             </div>
 
-            <div v-if="selectedProductData.local_version" class="space-y-6">
+            <div class="space-y-4 pt-6 border-t border-border">
 
-              <div v-if="selectedProductData.local_version !== selectedProductData.latest_version" class="bg-blue-900/20 border border-blue-800 p-4 rounded-lg flex items-center justify-between">
-                <div>
-                  <h4 class="font-bold text-blue-400">Update Available!</h4>
-                  <p class="text-sm text-blue-200">Version {{ selectedProductData.latest_version }} is ready to install.</p>
+              <div v-if="!selectedProductData.local_version" class="flex items-center gap-4">
+                <Select v-model="targetInstallVersion" :disabled="isBusy || isOffline">
+                  <SelectTrigger class="w-[180px]">
+                    <SelectValue placeholder="Select version" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      <SelectItem v-for="v in selectedProductData.versions" :key="v" :value="v">
+                        Install v{{ v }}
+                      </SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+
+                <Button @click="updateProduct" :disabled="isBusy || isOffline" size="lg">
+                  Install Product
+                </Button>
+              </div>
+
+              <div v-if="selectedProductData.local_version" class="space-y-6">
+
+                <div v-if="selectedProductData.local_version !== selectedProductData.latest_version" class="bg-blue-900/20 border border-blue-800 p-4 rounded-lg flex items-center justify-between">
+                  <div>
+                    <h4 class="font-bold text-blue-400">Update Available!</h4>
+                    <p class="text-sm text-blue-200">Version {{ selectedProductData.latest_version }} is ready to install.</p>
+                  </div>
+                  <Button @click="updateProduct" :disabled="isBusy || isOffline" class="bg-blue-600 hover:bg-blue-500 text-white">
+                    Update Now
+                  </Button>
                 </div>
-                <Button @click="updateProduct" :disabled="isBusy" class="bg-blue-600 hover:bg-blue-500 text-white">
-                  Update Now
-                </Button>
+
+                <div v-else class="text-green-500 font-bold flex items-center gap-2">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+                  Product is fully up to date!
+                </div>
+
+                <div class="flex gap-4 w-full">
+                  <Button @click="launchApp" :disabled="isBusy" size="lg" class="flex-1 text-lg h-12">
+                    Launch Product
+                  </Button>
+                  <Button variant="secondary" @click="verifyFiles" :disabled="isBusy || isOffline" size="lg" class="h-12">
+                    Verify
+                  </Button>
+                  <Button variant="destructive" @click="uninstallProduct" :disabled="isBusy" size="lg" class="h-12">
+                    Uninstall
+                  </Button>
+                </div>
               </div>
 
-              <div v-else class="text-green-500 font-bold flex items-center gap-2">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-                Product is fully up to date!
+              <div v-if="isBusy" class="pt-6 space-y-2 animate-in fade-in slide-in-from-bottom-2">
+                <div class="flex justify-between items-end">
+                  <span class="text-sm font-medium text-muted-foreground">
+                    {{ currentTaskName }}...
+                    <span v-if="progressData.total > 0">({{ progressData.current }} / {{ progressData.total }} files)</span>
+                  </span>
+                  <button @click="showLogsModal = true" class="text-xs text-primary hover:underline">View Logs</button>
+                </div>
+                <Progress :model-value="progressData.percent" class="h-2 w-full" :class="{'animate-pulse': progressData.percent === 0}" />
               </div>
 
-              <div class="flex gap-4 w-full">
-                <Button @click="launchApp" :disabled="isBusy" size="lg" class="flex-1 text-lg h-12">
-                  Launch Product
-                </Button>
-                <Button variant="secondary" @click="verifyFiles" :disabled="isBusy" size="lg" class="h-12">
-                  Verify
-                </Button>
-                <Button variant="destructive" @click="uninstallProduct" :disabled="isBusy" size="lg" class="h-12">
-                  Uninstall
-                </Button>
-              </div>
             </div>
+          </CardContent>
+        </Card>
 
-            <div v-if="isBusy" class="pt-6 space-y-2 animate-in fade-in slide-in-from-bottom-2">
-              <div class="flex justify-between items-end">
-                <span class="text-sm font-medium text-muted-foreground">
-                  {{ currentTaskName }}...
-                  <span v-if="progressData.total > 0">({{ progressData.current }} / {{ progressData.total }} files)</span>
-                </span>
-                <button @click="showLogsModal = true" class="text-xs text-primary hover:underline">View Logs</button>
-              </div>
-              <Progress :model-value="progressData.percent" class="h-2 w-full" :class="{'animate-pulse': progressData.percent === 0}" />
-            </div>
-
-          </div>
-        </CardContent>
-      </Card>
-
-      <div v-else class="flex h-full items-center justify-center text-muted-foreground">
-        Select a product from the menu to manage it.
-      </div>
-    </main>
+        <div v-else class="flex h-full items-center justify-center text-muted-foreground">
+          Select a product from the menu to manage it.
+        </div>
+      </main>
+    </div>
 
     <Dialog :open="showLogsModal" @update:open="showLogsModal = $event">
       <DialogContent class="max-w-3xl h-[70vh] flex flex-col">
