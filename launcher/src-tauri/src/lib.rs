@@ -21,11 +21,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 use tauri::{Emitter, AppHandle};
-use updater::models::RootJson;
 use updater::ProductUpdater;
 use serde::Serialize;
 
@@ -39,6 +39,14 @@ struct ProgressPayload {
     current: usize,
     total: usize,
     percent: f64,
+}
+
+#[derive(Serialize)]
+struct ProductState {
+    latest_version: String,
+    manifest: String,
+    versions: Vec<String>,
+    local_version: Option<String>,
 }
 
 /// Validates the server URL, ensuring it ends with '/'
@@ -57,21 +65,30 @@ fn validate_server_url(mut url: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn fetch_root(state: tauri::State<'_, UpdaterConfig>) -> Result<RootJson, String> {
+async fn get_app_state(state: tauri::State<'_, UpdaterConfig>) -> Result<HashMap<String, ProductState>, String> {
     let url = state.server_url.lock().unwrap().clone();
     let dir = state.install_dir.lock().unwrap().clone();
 
     let updater = ProductUpdater::new(&url, dir);
-    updater.fetch_root().await.map_err(|e| e.to_string())
-}
 
-#[tauri::command]
-fn get_local_version(state: tauri::State<'_, UpdaterConfig>, product_name: String) -> Option<String> {
-    let url = state.server_url.lock().unwrap().clone();
-    let dir = state.install_dir.lock().unwrap().clone();
+    // Fetch the remote list
+    let root = updater.fetch_root().await.map_err(|e| e.to_string())?;
 
-    let updater = ProductUpdater::new(&url, dir);
-    updater.get_local_version(&product_name)
+    let mut app_state = HashMap::new();
+
+    // Merge remote data with local disk data
+    for (name, entry) in root.products {
+        let local_ver = updater.get_local_version(&name);
+
+        app_state.insert(name, ProductState {
+            latest_version: entry.latest_version,
+            manifest: entry.manifest,
+            versions: entry.versions,
+            local_version: local_ver,
+        });
+    }
+
+    Ok(app_state)
 }
 
 #[tauri::command]
@@ -208,8 +225,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             validate_server_url,
-            fetch_root,
-            get_local_version,
+            get_app_state,
             run_update,
             verify_integrity,
             launch_product,

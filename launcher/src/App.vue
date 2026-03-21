@@ -15,7 +15,6 @@ import { Progress } from '@/components/ui/progress';
 const products = ref<Record<string, any>>({});
 const selectedProductName = ref('');
 const selectedProductData = ref<any>(null);
-const localVersion = ref<string | null>(null);
 const targetInstallVersion = ref('');
 
 const isBusy = ref(false);
@@ -42,25 +41,22 @@ onMounted(async () => {
 
 async function refreshData() {
   try {
-    // No longer passing serverUrl
-    const rootJson: any = await invoke('fetch_root');
-    products.value = rootJson.products || {};
+    const state: any = await invoke('get_app_state');
+    products.value = state || {};
 
+    // Re-select the current product to update its UI state if one is selected
     if (selectedProductName.value) {
       await selectProduct(selectedProductName.value);
     }
   } catch (err: any) {
-    alert("Failed to fetch root.json: " + err);
+    alert("Failed to fetch app state: " + err);
   }
 }
 
 async function selectProduct(name: string) {
   selectedProductName.value = name;
   selectedProductData.value = products.value[name];
-
   targetInstallVersion.value = selectedProductData.value.latest_version;
-  // No longer passing serverUrl
-  localVersion.value = await invoke('get_local_version', { productName: name });
 }
 
 async function updateProduct() {
@@ -77,7 +73,7 @@ async function updateProduct() {
       availableVersions: selectedProductData.value.versions
     });
     progressData.value.percent = 100;
-    await selectProduct(selectedProductName.value);
+    await refreshData();
   } catch (err: any) {
     const errorString = String(err);
 
@@ -119,17 +115,17 @@ async function launchApp() {
 }
 
 async function verifyFiles() {
-  if (!localVersion.value) return;
+  if (!selectedProductData.value?.local_version) return;
+
   isBusy.value = true;
   currentTaskName.value = 'Verifying Integrity';
   progressData.value = { current: 0, total: 0, percent: 0 }; // Reset progress
   logs.value.push(`--- Starting Integrity Check ---`);
 
   try {
-    // No longer passing serverUrl
     const corruptedFiles: string[] = await invoke('verify_integrity', {
       productName: selectedProductName.value,
-      version: localVersion.value
+      version: selectedProductData.value.local_version
     });
 
     if (corruptedFiles.length > 0) {
@@ -156,9 +152,7 @@ async function uninstallProduct() {
       productName: selectedProductName.value,
     });
     logs.value.push(`${selectedProductName.value} was successfully uninstalled.`);
-
-    // Clear the local version to update the UI back to the "Install" state
-    localVersion.value = null;
+    await refreshData();
   } catch (err: any) {
     logs.value.push(`ERROR: ${err}`);
     alert(`Failed to uninstall: ${err}`);
@@ -209,7 +203,7 @@ async function uninstallProduct() {
           <div class="flex gap-8 mb-6 text-sm">
             <div class="flex flex-col">
               <span class="text-muted-foreground">Local Version</span>
-              <span class="font-mono font-medium text-lg">{{ localVersion || 'Not Installed' }}</span>
+              <span class="font-mono font-medium text-lg">{{ selectedProductData.local_version || 'Not Installed' }}</span>
             </div>
             <div class="flex flex-col">
               <span class="text-muted-foreground">Latest Version</span>
@@ -219,7 +213,7 @@ async function uninstallProduct() {
 
           <div class="space-y-4 pt-6 border-t border-border">
 
-            <div v-if="!localVersion" class="flex items-center gap-4">
+            <div v-if="!selectedProductData.local_version" class="flex items-center gap-4">
               <Select v-model="targetInstallVersion">
                 <SelectTrigger class="w-[180px]">
                   <SelectValue placeholder="Select version" />
@@ -238,9 +232,9 @@ async function uninstallProduct() {
               </Button>
             </div>
 
-            <div v-if="localVersion" class="space-y-6">
+            <div v-if="selectedProductData.local_version" class="space-y-6">
 
-              <div v-if="localVersion !== selectedProductData.latest_version" class="bg-blue-900/20 border border-blue-800 p-4 rounded-lg flex items-center justify-between">
+              <div v-if="selectedProductData.local_version !== selectedProductData.latest_version" class="bg-blue-900/20 border border-blue-800 p-4 rounded-lg flex items-center justify-between">
                 <div>
                   <h4 class="font-bold text-blue-400">Update Available!</h4>
                   <p class="text-sm text-blue-200">Version {{ selectedProductData.latest_version }} is ready to install.</p>
