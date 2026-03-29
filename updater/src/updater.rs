@@ -349,11 +349,15 @@ impl ProductUpdater {
 }
 
 /// Compute the BLAKE3 hash of a file on disk.
-fn file_hash(path: &Path) -> Result<String> {
-    let mut file = fs::File::open(path).with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
-    let mut hasher = blake3::Hasher::new();
-    std::io::copy(&mut file, &mut hasher)?;
-    Ok(hasher.finalize().to_hex().to_string())
+async fn file_hash_async(path: PathBuf) -> Result<String> {
+    tokio::task::spawn_blocking(move || {
+        let mut file = fs::File::open(&path).with_context(|| format!("Failed to open file for hashing: {}", path.display()))?;
+        let mut hasher = blake3::Hasher::new();
+        std::io::copy(&mut file, &mut hasher)?;
+        Ok(hasher.finalize().to_hex().to_string())
+    })
+        .await
+        .context("Thread panicked during hashing")?
 }
 
 /// Apply an HDiffPatch binary patch using the native Rust library.
@@ -429,7 +433,7 @@ async fn update_file(
     }
 
     // Already up to date?
-    if dest.exists() && file_hash(&dest).unwrap_or_default() == entry.hash {
+    if dest.exists() && file_hash_async(dest.clone()).await.unwrap_or_default() == entry.hash {
         return Ok(());
     }
 
@@ -450,7 +454,7 @@ async fn update_file(
                 // If download succeeds, try to apply it
                 if download_to(client, &patch_url, &patch_dest, 0).await.is_ok() {
                     if apply_patch(dest.clone(), patch_dest.clone(), dest.clone()).await.is_ok() {
-                        if file_hash(&dest).unwrap_or_default() == entry.hash {
+                        if file_hash_async(dest.clone()).await.unwrap_or_default() == entry.hash {
                             patch_successful = true;
                         }
                     }
@@ -472,7 +476,7 @@ async fn update_file(
         let download_result = async {
             download_to(client, &full_url, &download_temp_dest, entry.size).await?;
 
-            let downloaded_hash = file_hash(&download_temp_dest).unwrap_or_default();
+            let downloaded_hash = file_hash_async(download_temp_dest.clone()).await.unwrap_or_default();
             if downloaded_hash != entry.hash {
                 let _ = fs::remove_file(&download_temp_dest); // Clean up bad file
                 return Err(anyhow::anyhow!("Hash mismatch after downloading full file: {}", rel_path));
