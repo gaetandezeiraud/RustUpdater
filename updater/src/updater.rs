@@ -452,8 +452,9 @@ async fn update_file(
         // Try patching (We only try this on the first attempt to save time)
         if allow_patch && attempts == 1 {
             if let (Some(patch_info), true) = (&entry.patch, dest.exists()) {
-                let patch_url = format!("{}products/{}/{}/{}", base_url, product_name, version, patch_info.file);
-                let safe_temp_name = rel_path.replace("/", "_").replace("\\", "_");
+                let url_patch_file = patch_info.file.replace('\\', "/");
+                let patch_url = format!("{}products/{}/{}/{}", base_url, product_name, version, url_patch_file);
+                let safe_temp_name = blake3::hash(rel_path.as_bytes()).to_hex().to_string();
                 let patch_dest = temp_dir.join(format!("{}.patch", safe_temp_name));
 
                 // If download succeeds, try to apply it
@@ -474,8 +475,9 @@ async fn update_file(
         }
 
         // Full download fallback
-        let full_url = format!("{}products/{}/{}/full/{}", base_url, product_name, version, rel_path);
-        let safe_temp_name = rel_path.replace("/", "_").replace("\\", "_");
+        let url_rel_path = rel_path.replace('\\', "/");
+        let full_url = format!("{}products/{}/{}/full/{}", base_url, product_name, version, url_rel_path);
+        let safe_temp_name = blake3::hash(rel_path.as_bytes()).to_hex().to_string();
         let download_temp_dest = temp_dir.join(format!("{}.download", safe_temp_name));
 
         let download_result = async {
