@@ -72,7 +72,7 @@ pub fn run() {
             get_cached_app_state,
             get_app_state,
             run_update,
-            verify_integrity,
+            repair_installation,
             launch_product,
             uninstall_product,
             force_kill_product

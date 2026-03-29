@@ -172,28 +172,25 @@ async function launchApp() {
   }
 }
 
-async function verifyFiles() {
+async function repairInstallation() {
   if (!selectedProductData.value?.local_version) return;
 
   isBusy.value = true;
-  currentTaskName.value = 'Verifying Integrity';
+  currentTaskName.value = 'Repairing Installation';
   progressData.value = { current: 0, total: 0, percent: 0 }; // Reset progress
-  logs.value.push(`--- Starting Integrity Check ---`);
+  logs.value.push(`--- Starting Repair Scan ---`);
 
   try {
-    const corruptedFiles: string[] = await invoke('verify_integrity', {
+    await invoke('repair_installation', {
       productName: selectedProductName.value,
       version: selectedProductData.value.local_version
     });
 
-    if (corruptedFiles.length > 0) {
-      logs.value.push(`Found ${corruptedFiles.length} corrupted files. Run an update to repair.`);
-    } else {
-      logs.value.push(`Integrity Check Passed! All files are fully valid.`);
-    }
+    logs.value.push(`Repair complete! The installation is fully valid.`);
     progressData.value.percent = 100;
   } catch (err: any) {
     logs.value.push(`ERROR: ${err}`);
+    alert(err);
   } finally {
     setTimeout(() => { isBusy.value = false; }, 1000);
   }
@@ -345,8 +342,8 @@ async function uninstallProduct() {
                   <Button @click="launchApp" :disabled="isBusy" size="lg" class="flex-1 text-lg h-12">
                     Launch Product
                   </Button>
-                  <Button variant="secondary" @click="verifyFiles" :disabled="isBusy || isOffline" size="lg" class="h-12">
-                    Verify
+                  <Button variant="secondary" @click="repairInstallation" :disabled="isBusy || isOffline" size="lg" class="h-12">
+                    Repair
                   </Button>
                   <Button variant="destructive" @click="uninstallProduct" :disabled="isBusy" size="lg" class="h-12">
                     Uninstall

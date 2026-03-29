@@ -115,17 +115,25 @@ pub(crate) async fn run_update(
 }
 
 #[tauri::command]
-pub(crate) async fn verify_integrity(
+pub(crate) async fn repair_installation(
     app: AppHandle,
     state: tauri::State<'_, UpdaterConfig>,
     product_name: String,
     version: String,
-) -> Result<Vec<String>, String> {
+) -> Result<String, String> {
     let url = state.server_url.lock().unwrap().clone();
     let dir = state.install_dir.lock().unwrap().clone();
+    let product_dir = dir.join(&product_name);
+
+    // Is running?
+    if let Some(exe_name) = crate::process::get_local_exe_name(&product_dir) {
+        if crate::process::is_process_running(&exe_name) {
+            return Err(format!("Cannot repair: {} is currently running. Please close it first.", product_name));
+        }
+    }
 
     let updater = ProductUpdater::new(&url, dir);
-    let _ = app.emit("log", format!("Verifying files for {} v{}...", product_name, version));
+    let _ = app.emit("log", format!("Scanning and repairing files for {} v{}...", product_name, version));
 
     let app_clone = app.clone();
     let progress_callback = move |current: usize, total: usize| {
@@ -134,16 +142,16 @@ pub(crate) async fn verify_integrity(
         let _ = app_clone.emit("progress", payload);
     };
 
-    match updater.verify_integrity(&product_name, &version, progress_callback).await {
-        Ok(corrupted) => {
-            if corrupted.is_empty() {
-                let _ = app.emit("log", "Integrity check passed! All files 100% correct.".to_string());
-            } else {
-                let _ = app.emit("log", format!("CRITICAL: Found {} corrupted files.", corrupted.len()));
-            }
-            Ok(corrupted)
+    match updater.repair_installation(&product_name, &version, progress_callback).await {
+        Ok(_) => {
+            let _ = app.emit("log", "Repair complete! All files are now 100% correct.".to_string());
+            Ok("Success".to_string())
         }
-        Err(e) => Err(e.to_string()),
+        Err(e) => {
+            let err_msg = format!("Repair failed: {}", e);
+            let _ = app.emit("log", err_msg.clone());
+            Err(err_msg)
+        }
     }
 }
 

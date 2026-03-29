@@ -226,21 +226,27 @@ impl ProductUpdater {
         // Evaluate strategy
         // We only patch if the total patch cost is strictly less than a full download.
         // Also if total_patch_cost is 0, it means no patches exist, so we force a full download.
-        if total_patch_cost > 0 && total_patch_cost < full_size {
-            for manifest in manifests {
-                self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, true, completed_files.clone(), total_files, on_progress.clone()).await?;
-                // Save intermediate version progression in case of unexpected closure
-                Self::save_local_version(&product_dir, &manifest.version)?;
-                Self::save_local_manifest(&product_dir, &manifest)?;
+        let update_result: Result<()> = async {
+            if total_patch_cost > 0 && total_patch_cost < full_size {
+                for manifest in manifests {
+                    self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, true, completed_files.clone(), total_files, on_progress.clone()).await?;
+                    // Save intermediate version progression in case of unexpected closure
+                    Self::save_local_version(&product_dir, &manifest.version)?;
+                    Self::save_local_manifest(&product_dir, &manifest)?;
+                }
+            } else {
+                // Apply the final manifest directly with patching disabled to force a fresh download
+                self.apply_manifest(product_name, &target_manifest, &product_dir, &temp_dir, false, completed_files, total_files, on_progress).await?;
+                Self::save_local_version(&product_dir, target_version)?;
+                Self::save_local_manifest(&product_dir, &target_manifest)?;
             }
-        } else {
-            // Apply the final manifest directly with patching disabled to force a fresh download
-            self.apply_manifest(product_name, &target_manifest, &product_dir, &temp_dir, false, completed_files, total_files, on_progress).await?;
-            Self::save_local_version(&product_dir, target_version)?;
-            Self::save_local_manifest(&product_dir, &target_manifest)?;
-        }
+            Ok(())
+        }.await;
 
         let _ = fs::remove_dir_all(&temp_dir);
+
+        update_result?;
+
         Ok(())
     }
 
@@ -314,7 +320,7 @@ impl ProductUpdater {
     }
 
     /// Verify the integrity of a locally installed product against its manifest
-    pub async fn verify_integrity<F>(&self, product_name: &str, version: &str, on_progress: F) -> Result<Vec<String>>
+    pub async fn repair_installation<F>(&self, product_name: &str, version: &str, on_progress: F) -> Result<()>
     where
         F: Fn(usize, usize) + Send + Sync + 'static,
     {
@@ -323,44 +329,22 @@ impl ProductUpdater {
 
         if !product_dir.exists() { return Err(anyhow::anyhow!("Product directory does not exist.")); }
 
+        let temp_dir = self.install_dir.join(".temp");
+        fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
+
         let total_files = manifest.files.len();
         let completed_files = Arc::new(AtomicUsize::new(0));
-        let on_progress = Arc::new(on_progress);
 
-        // Process file hashing concurrently
-        let corrupted_files: Vec<String> = stream::iter(manifest.files)
-            .map(|(rel_path, entry)| {
-                let path = product_dir.join(&rel_path);
-                let expected_hash = entry.hash.clone();
-                let rel_path_clone = rel_path.clone();
+        // Apply the manifest with patching disabled to force a fresh download of any corrupted files.
+        // Skips files with a matching hash.
+        let result = self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, false, completed_files, total_files, on_progress).await;
 
-                let completed_clone = completed_files.clone();
-                let prog_clone = Arc::clone(&on_progress);
+        // Always clean the temp dir
+        let _ = fs::remove_dir_all(&temp_dir);
 
-                async move {
-                    let res = tokio::task::spawn_blocking(move || {
-                        if !path.exists() { return Some(rel_path_clone); }
+        result?;
 
-                        // Hash the file and compare
-                        match file_hash(&path) {
-                            Ok(hash) if hash == expected_hash => None,
-                            _ => Some(rel_path_clone),
-                        }
-                    }).await.expect("Blocking task panicked");
-
-                    // Atomically increment and report progress
-                    let current = completed_clone.fetch_add(1, Ordering::Relaxed) + 1;
-                    prog_clone(current, total_files);
-
-                    res
-                }
-            })
-            .buffer_unordered(CONCURRENCY)
-            .filter_map(|result| async { result })
-            .collect()
-            .await;
-
-        Ok(corrupted_files)
+        Ok(())
     }
 }
 
