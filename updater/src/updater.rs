@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration};
 use hdiffpatch_rs::patchers::HDiff;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufWriter};
 
 /// Files larger than this are written to disk via streaming instead of being
 /// loaded entirely into RAM first.
@@ -404,12 +404,17 @@ async fn download_to(client: &Client, url: &str, dest: &Path, known_size: u64) -
         let bytes = response.bytes().await.with_context(|| format!("Failed to read response body from {}", url))?;
         tokio::fs::write(dest, bytes).await.with_context(|| format!("Failed to write {}", dest.display()))?;
     } else {
-        let mut file = tokio::fs::File::create(dest).await.with_context(|| format!("Failed to create {}", dest.display()))?;
+        let file = tokio::fs::File::create(dest).await.with_context(|| format!("Failed to create {}", dest.display()))?;
+
+        // Use a 1 MB buffer for large files (streamed so >= STREAM_THRESHOLD) instead of the default 8 KB
+        let mut writer = BufWriter::with_capacity(1024 * 1024, file);
+
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("Stream error from {}", url))?;
-            file.write_all(&chunk).await.with_context(|| format!("Failed to write chunk to {}", dest.display()))?;
+            writer.write_all(&chunk).await.with_context(|| format!("Failed to write chunk to {}", dest.display()))?;
         }
+        writer.flush().await.with_context(|| format!("Failed to flush buffer for {}", dest.display()))?;
     }
     Ok(())
 }
