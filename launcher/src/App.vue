@@ -20,7 +20,7 @@ const targetInstallVersion = ref('');
 const isOffline = ref(false);
 const isBusy = ref(false);
 const currentTaskName = ref('');
-const progressData = ref({ current: 0, total: 0, percent: 0 });
+const progressData = ref({ current: 0, total: 0, percent: 0, highest: 0 });
 
 const showLogsModal = ref(false);
 const logs = ref<string[]>([]);
@@ -40,7 +40,24 @@ onMounted(async () => {
 
   // Listen for detailed progress emitted from Rust
   await listen<any>('progress', (event) => {
-    progressData.value = event.payload;
+    const data = event.payload;
+
+    // Calculate the true percentage
+    let actualPercent = 0;
+    if (data.total > 0) {
+      actualPercent = (data.current / data.total) * 100;
+    }
+
+    // Prevent the progress bar from ever going backwards
+    if (actualPercent > progressData.value.highest) {
+      progressData.value.highest = actualPercent;
+    } else if (actualPercent === 0) {
+      progressData.value.highest = 0;
+    }
+
+    progressData.value.current = data.current;
+    progressData.value.total = data.total;
+    progressData.value.percent = progressData.value.highest;
   });
 
   // Load local cache
@@ -100,7 +117,7 @@ async function selectProduct(name: string) {
 async function updateProduct() {
   isBusy.value = true;
   currentTaskName.value = 'Downloading & Applying Updates';
-  progressData.value = { current: 0, total: 0, percent: 0 };
+  progressData.value = { current: 0, total: 0, percent: 0, highest: 0 };
   logs.value.push(`--- Starting Update for ${selectedProductName.value} ---`);
 
   let success = false;
@@ -159,7 +176,7 @@ async function updateProduct() {
 async function launchApp() {
   isBusy.value = true;
   currentTaskName.value = 'Launching App';
-  progressData.value = { current: 0, total: 0, percent: 100 }; // Fake full bar for launch
+  progressData.value = { current: 0, total: 0, percent: 100, highest: 0 }; // Fake full bar for launch
   try {
     // No longer passing serverUrl
     await invoke('launch_product', {
@@ -177,7 +194,7 @@ async function repairInstallation() {
 
   isBusy.value = true;
   currentTaskName.value = 'Repairing Installation';
-  progressData.value = { current: 0, total: 0, percent: 0 }; // Reset progress
+  progressData.value = { current: 0, total: 0, percent: 0, highest: 0 }; // Reset progress
   logs.value.push(`--- Starting Repair Scan ---`);
 
   try {
@@ -201,7 +218,7 @@ async function uninstallProduct() {
 
   isBusy.value = true;
   currentTaskName.value = 'Uninstalling Product';
-  progressData.value = { current: 0, total: 0, percent: 100 };
+  progressData.value = { current: 0, total: 0, percent: 100, highest: 0 };
   logs.value.push(`--- Uninstalling ${selectedProductName.value} ---`);
 
   let success = false;
@@ -355,7 +372,6 @@ async function uninstallProduct() {
                 <div class="flex justify-between items-end">
                   <span class="text-sm font-medium text-muted-foreground">
                     {{ currentTaskName }}...
-                    <span v-if="progressData.total > 0">({{ progressData.current }} / {{ progressData.total }} files)</span>
                   </span>
                   <button @click="showLogsModal = true" class="text-xs text-primary hover:underline">View Logs</button>
                 </div>

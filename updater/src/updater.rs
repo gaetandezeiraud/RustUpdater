@@ -27,7 +27,7 @@ use futures::stream::{self, StreamExt};
 use reqwest::Client;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration};
 use hdiffpatch_rs::patchers::HDiff;
@@ -214,14 +214,14 @@ impl ProductUpdater {
             ));
         }
 
-        // Calculate total files for the progress bar across all manifests
-        let total_files: usize = if total_patch_cost > 0 && total_patch_cost < full_size {
-            manifests.iter().map(|m| m.files.len()).sum()
+        // Calculate total files bytes for the progress bar across all manifests
+        let total_bytes: u64 = if total_patch_cost > 0 && total_patch_cost < full_size {
+            manifests.iter().flat_map(|m| m.files.values()).map(|f| f.size).sum()
         } else {
-            target_manifest.files.len()
+            target_manifest.files.values().map(|f| f.size).sum()
         };
 
-        let completed_files = Arc::new(AtomicUsize::new(0));
+        let completed_bytes = Arc::new(AtomicI64::new(0));
 
         // Evaluate strategy
         // We only patch if the total patch cost is strictly less than a full download.
@@ -229,14 +229,14 @@ impl ProductUpdater {
         let update_result: Result<()> = async {
             if total_patch_cost > 0 && total_patch_cost < full_size {
                 for manifest in manifests {
-                    self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, true, completed_files.clone(), total_files, on_progress.clone()).await?;
+                    self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, true, completed_bytes.clone(), total_bytes, on_progress.clone()).await?;
                     // Save intermediate version progression in case of unexpected closure
                     Self::save_local_version(&product_dir, &manifest.version)?;
                     Self::save_local_manifest(&product_dir, &manifest)?;
                 }
             } else {
                 // Apply the final manifest directly with patching disabled to force a fresh download
-                self.apply_manifest(product_name, &target_manifest, &product_dir, &temp_dir, false, completed_files, total_files, on_progress).await?;
+                self.apply_manifest(product_name, &target_manifest, &product_dir, &temp_dir, false, completed_bytes, total_bytes, on_progress).await?;
                 Self::save_local_version(&product_dir, target_version)?;
                 Self::save_local_manifest(&product_dir, &target_manifest)?;
             }
@@ -258,8 +258,8 @@ impl ProductUpdater {
         product_dir: &Path,
         temp_dir: &Path,
         allow_patch: bool,
-        completed_files: Arc<AtomicUsize>,
-        total_files: usize,
+        completed_files: Arc<AtomicI64>,
+        total_bytes: u64,
         on_progress: F,
     ) -> Result<()>
     where
@@ -289,14 +289,14 @@ impl ProductUpdater {
                 let completed_clone = completed_files.clone();
                 let prog_clone = Arc::clone(&on_progress);
 
+                // Safely add/subtract bytes
+                let on_delta = Arc::new(move |delta: i64| {
+                    let current = completed_clone.fetch_add(delta, Ordering::Relaxed) + delta;
+                    prog_clone(current.max(0) as usize, total_bytes as usize);
+                });
+
                 async move {
-                    let res = update_file(&client, &base_url, &product_name, &version, &product_dir, &temp_dir, &rel_path, &file_entry, allow_patch).await;
-
-                    // Atomically increment the completed files counter and trigger the callback
-                    let current = completed_clone.fetch_add(1, Ordering::Relaxed) + 1;
-                    prog_clone(current, total_files);
-
-                    res
+                    update_file(&client, &base_url, &product_name, &version, &product_dir, &temp_dir, &rel_path, &file_entry, allow_patch, on_delta).await
                 }
             })
             .buffer_unordered(CONCURRENCY)
@@ -332,12 +332,12 @@ impl ProductUpdater {
         let temp_dir = self.install_dir.join(".temp");
         fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
 
-        let total_files = manifest.files.len();
-        let completed_files = Arc::new(AtomicUsize::new(0));
+        let total_bytes: u64 = manifest.files.values().map(|f| f.size).sum();
+        let completed_bytes = Arc::new(AtomicI64::new(0));
 
         // Apply the manifest with patching disabled to force a fresh download of any corrupted files.
         // Skips files with a matching hash.
-        let result = self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, false, completed_files, total_files, on_progress).await;
+        let result = self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, false, completed_bytes, total_bytes, on_progress).await;
 
         // Always clean the temp dir
         let _ = fs::remove_dir_all(&temp_dir);
@@ -396,12 +396,13 @@ async fn apply_patch(old_path: PathBuf, patch_path: PathBuf, out_path: PathBuf) 
 }
 
 /// Download a URL and write it to `dest`.
-async fn download_to(client: &Client, url: &str, dest: &Path, known_size: u64) -> Result<()> {
+async fn download_to(client: &Client, url: &str, dest: &Path, known_size: u64, on_chunk: &impl Fn(u64)) -> Result<()> {
     let response = client.get(url).send().await.with_context(|| format!("Failed to download {}", url))?;
     let streamed = known_size >= STREAM_THRESHOLD;
 
     if !streamed {
         let bytes = response.bytes().await.with_context(|| format!("Failed to read response body from {}", url))?;
+        on_chunk(bytes.len() as u64);
         tokio::fs::write(dest, bytes).await.with_context(|| format!("Failed to write {}", dest.display()))?;
     } else {
         let file = tokio::fs::File::create(dest).await.with_context(|| format!("Failed to create {}", dest.display()))?;
@@ -412,6 +413,7 @@ async fn download_to(client: &Client, url: &str, dest: &Path, known_size: u64) -
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.with_context(|| format!("Stream error from {}", url))?;
+            on_chunk(chunk.len() as u64);
             writer.write_all(&chunk).await.with_context(|| format!("Failed to write chunk to {}", dest.display()))?;
         }
         writer.flush().await.with_context(|| format!("Failed to flush buffer for {}", dest.display()))?;
@@ -430,7 +432,8 @@ async fn update_file(
     temp_dir: &Path,
     rel_path: &str,
     entry: &FileEntry,
-    allow_patch: bool
+    allow_patch: bool,
+    on_delta: Arc<dyn Fn(i64) + Send + Sync>
 ) -> Result<()> {
     let dest = product_dir.join(rel_path);
     if let Some(parent) = dest.parent() {
@@ -439,6 +442,7 @@ async fn update_file(
 
     // Already up to date?
     if dest.exists() && file_hash_async(dest.clone()).await.unwrap_or_default() == entry.hash {
+        on_delta(entry.size as i64);
         return Ok(());
     }
 
@@ -458,7 +462,7 @@ async fn update_file(
                 let patch_dest = temp_dir.join(format!("{}.patch", safe_temp_name));
 
                 // If download succeeds, try to apply it
-                if download_to(client, &patch_url, &patch_dest, 0).await.is_ok() {
+                if download_to(client, &patch_url, &patch_dest, 0, &|_| {}).await.is_ok() {
                     if apply_patch(dest.clone(), patch_dest.clone(), dest.clone()).await.is_ok() {
                         if file_hash_async(dest.clone()).await.unwrap_or_default() == entry.hash {
                             patch_successful = true;
@@ -471,6 +475,7 @@ async fn update_file(
         }
 
         if patch_successful {
+            on_delta(entry.size as i64);
             return Ok(());
         }
 
@@ -480,8 +485,15 @@ async fn update_file(
         let safe_temp_name = blake3::hash(rel_path.as_bytes()).to_hex().to_string();
         let download_temp_dest = temp_dir.join(format!("{}.download", safe_temp_name));
 
+        // Track chunks so we can roll them back if the download fails
+        let downloaded_this_attempt = std::sync::atomic::AtomicI64::new(0);
+        let on_dl_chunk = |chunk_size: u64| {
+            downloaded_this_attempt.fetch_add(chunk_size as i64, Ordering::Relaxed);
+            on_delta(chunk_size as i64);
+        };
+
         let download_result = async {
-            download_to(client, &full_url, &download_temp_dest, entry.size).await?;
+            download_to(client, &full_url, &download_temp_dest, entry.size, &on_dl_chunk).await?;
 
             let downloaded_hash = file_hash_async(download_temp_dest.clone()).await.unwrap_or_default();
             if downloaded_hash != entry.hash {
@@ -499,9 +511,11 @@ async fn update_file(
         match download_result {
             Ok(_) => return Ok(()),
             Err(e) => {
+                on_delta(-downloaded_this_attempt.load(Ordering::Relaxed));
                 if attempts >= MAX_RETRIES {
                     return Err(e.context(format!("Failed to update {} after {} attempts", rel_path, MAX_RETRIES)));
                 }
+
                 // Wait 1 second before retrying to give the network a chance to stabilize
                 tokio::time::sleep(Duration::from_secs(1)).await;
             }
