@@ -22,9 +22,6 @@ const isBusy = ref(false);
 const currentTaskName = ref('');
 const progressData = ref({ current: 0, total: 0, percent: 0, highest: 0 });
 
-const showLogsModal = ref(false);
-const logs = ref<string[]>([]);
-
 async function processUninstallIntent(intent: string | null) {
   if (intent && products.value[intent]) {
     await selectProduct(intent);
@@ -33,11 +30,6 @@ async function processUninstallIntent(intent: string | null) {
 }
 
 onMounted(async () => {
-  // Listen for logs emitted
-  await listen<string>('log', (event) => {
-    logs.value.push(event.payload);
-  });
-
   // Listen for detailed progress emitted from Rust
   await listen<any>('progress', (event) => {
     const data = event.payload;
@@ -118,7 +110,7 @@ async function updateProduct() {
   isBusy.value = true;
   currentTaskName.value = 'Downloading & Applying Updates';
   progressData.value = { current: 0, total: 0, percent: 0, highest: 0 };
-  logs.value.push(`--- Starting Update for ${selectedProductName.value} ---`);
+  console.log(`--- Starting Update for ${selectedProductName.value} ---`);
 
   let success = false;
 
@@ -137,20 +129,20 @@ async function updateProduct() {
 
       if (errorString.includes("currently running")) {
         if (confirm(`${selectedProductName.value} is currently running.\n\nDo you want to force close it to continue the update?`)) {
-          logs.value.push('Attempting to force kill the process...');
+          console.log('Attempting to force kill the process...');
           try {
             await invoke('force_kill_product', { productName: selectedProductName.value });
-            logs.value.push('Process killed. Resuming update...');
+            console.log('Process killed. Resuming update...');
             // Wait 1 second to give Windows time to release the file locks
             await new Promise(r => setTimeout(r, 1000));
             // Jump back to the top of the loop and try the update again!
           } catch (killErr) {
-            logs.value.push(`Failed to kill process: ${killErr}`);
+            console.error(`Failed to kill process: ${killErr}`);
             alert(`Could not close the application automatically. Please close it manually.`);
             break;
           }
         } else {
-          logs.value.push('Update cancelled by user (application running).');
+          console.log('Update cancelled by user (application running).');
           break; // User declined
         }
       } else if (errorString.includes("INSUFFICIENT_SPACE")) {
@@ -160,10 +152,10 @@ async function updateProduct() {
         const availGb = (parseInt(parts[2]) / 1024 / 1024 / 1024).toFixed(2);
         const msg = `Not enough disk space! You need at least ${reqGb} GB, but only have ${availGb} GB available.`;
         alert(msg);
-        logs.value.push(`CRITICAL ERROR: ${msg}`);
+        console.error(`CRITICAL ERROR: ${msg}`);
         break;
       } else {
-        logs.value.push(`ERROR: ${errorString}`);
+        console.error(`ERROR: ${errorString}`);
         alert(`Update failed: ${errorString}`);
         break;
       }
@@ -195,7 +187,7 @@ async function repairInstallation() {
   isBusy.value = true;
   currentTaskName.value = 'Repairing Installation';
   progressData.value = { current: 0, total: 0, percent: 0, highest: 0 }; // Reset progress
-  logs.value.push(`--- Starting Repair Scan ---`);
+  console.log(`--- Starting Repair Scan ---`);
 
   try {
     await invoke('repair_installation', {
@@ -203,10 +195,10 @@ async function repairInstallation() {
       version: selectedProductData.value.local_version
     });
 
-    logs.value.push(`Repair complete! The installation is fully valid.`);
+    console.log(`Repair complete! The installation is fully valid.`);
     progressData.value.percent = 100;
   } catch (err: any) {
-    logs.value.push(`ERROR: ${err}`);
+    console.error(`ERROR: ${err}`);
     alert(err);
   } finally {
     setTimeout(() => { isBusy.value = false; }, 1000);
@@ -219,7 +211,7 @@ async function uninstallProduct() {
   isBusy.value = true;
   currentTaskName.value = 'Uninstalling Product';
   progressData.value = { current: 0, total: 0, percent: 100, highest: 0 };
-  logs.value.push(`--- Uninstalling ${selectedProductName.value} ---`);
+  console.log(`--- Uninstalling ${selectedProductName.value} ---`);
 
   let success = false;
 
@@ -228,7 +220,7 @@ async function uninstallProduct() {
       await invoke('uninstall_product', {
         productName: selectedProductName.value,
       });
-      logs.value.push(`${selectedProductName.value} uninstalled.`);
+      console.log(`${selectedProductName.value} uninstalled.`);
       await refreshData();
       success = true;
     } catch (err: any) {
@@ -236,22 +228,23 @@ async function uninstallProduct() {
 
       if (errorString.includes("currently running")) {
         if (confirm(`${selectedProductName.value} is currently running.\n\nDo you want to force close it to continue uninstalling?`)) {
-          logs.value.push('Attempting to force kill the process...');
+          console.log('Attempting to force kill the process...');
           try {
             await invoke('force_kill_product', { productName: selectedProductName.value });
-            logs.value.push('Process killed. Resuming uninstall...');
-            await new Promise(r => setTimeout(r, 1000));
+            console.log('Process killed. Resuming uninstall...');
+            await new Promise(r => setTimeout(r, 3000));
             // loopback, try the uninstall again
           } catch (killErr) {
             alert(`Could not close the application automatically. Please close it manually.`);
             break;
           }
         } else {
-          logs.value.push('Uninstall cancelled by user (application running).');
+          console.log('Uninstall cancelled by user (application running).');
           break;
         }
       } else {
         alert(`Failed to uninstall: ${errorString}`);
+        console.error(`Failed to uninstall: ${errorString}`);
         break;
       }
     }
@@ -289,9 +282,6 @@ async function uninstallProduct() {
         </div>
 
         <div class="mt-auto flex flex-col gap-2 pt-4 border-t border-border">
-          <Button variant="secondary" @click="showLogsModal = true">
-            View Logs
-          </Button>
           <Button variant="outline" @click="refreshData">
             Refresh Data
           </Button>
@@ -373,7 +363,6 @@ async function uninstallProduct() {
                   <span class="text-sm font-medium text-muted-foreground">
                     {{ currentTaskName }}...
                   </span>
-                  <button @click="showLogsModal = true" class="text-xs text-primary hover:underline">View Logs</button>
                 </div>
                 <Progress :model-value="progressData.percent" class="h-2 w-full" :class="{'animate-pulse': progressData.percent === 0}" />
               </div>
@@ -387,26 +376,6 @@ async function uninstallProduct() {
         </div>
       </main>
     </div>
-
-    <Dialog :open="showLogsModal" @update:open="showLogsModal = $event">
-      <DialogContent class="max-w-3xl h-[70vh] flex flex-col">
-        <DialogHeader>
-          <DialogTitle>Process Logs</DialogTitle>
-          <DialogDescription>Live output from the updater engine.</DialogDescription>
-        </DialogHeader>
-
-        <ScrollArea class="flex-1 w-full rounded-md border p-4 bg-black/90">
-          <div class="font-mono text-sm text-green-400 space-y-1">
-            <div v-for="(log, idx) in logs" :key="idx">{{ log }}</div>
-            <div v-if="logs.length === 0" class="text-muted-foreground">Waiting for process...</div>
-          </div>
-        </ScrollArea>
-
-        <DialogFooter>
-          <Button variant="outline" @click="showLogsModal = false">Close</Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
 
   </div>
 </template>

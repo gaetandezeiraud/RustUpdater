@@ -29,6 +29,7 @@ use std::sync::Mutex;
 use state::UpdaterConfig;
 use commands::*;
 use tauri::{Manager, Emitter};
+use tauri_plugin_log::log::LevelFilter;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -45,6 +46,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_log::Builder::new().level(LevelFilter::Info).build())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             // Bring the existing launcher window to the front
@@ -68,7 +70,6 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_startup_intent,
-            validate_server_url,
             get_cached_app_state,
             get_app_state,
             run_update,

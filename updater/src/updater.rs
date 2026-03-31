@@ -517,7 +517,7 @@ async fn update_file(
                 }
 
                 // Wait 1 second before retrying to give the network a chance to stabilize
-                tokio::time::sleep(Duration::from_secs(1)).await;
+                tokio::time::sleep(Duration::from_secs(3)).await;
             }
         }
     }
