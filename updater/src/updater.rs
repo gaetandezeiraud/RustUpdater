@@ -319,8 +319,57 @@ impl ProductUpdater {
         Ok(())
     }
 
+    /// Recursively removes files that are not present in the given manifest
+    /// Returns a list of files that could not be deleted (because they were locked)
+    fn remove_unknown_files(current_dir: &Path, base_dir: &Path, manifest: &Manifest) -> Result<Vec<PathBuf>> {
+        let mut locked_files = Vec::new();
+
+        if !current_dir.is_dir() {
+            return Ok(locked_files);
+        }
+
+        for entry in fs::read_dir(current_dir).context("Failed to read directory")? {
+            let entry = entry?;
+            let path = entry.path();
+
+            // Get file type without following symlinks
+            let file_type = entry.file_type().context("Failed to get file type")?;
+
+            if file_type.is_dir() {
+                // Merge locked files from subdirectories
+                locked_files.extend(Self::remove_unknown_files(&path, base_dir, manifest)?);
+
+                // Try to remove the directory if empty
+                // If it fails, it might contain locked files, so we just ignore the error
+                if fs::read_dir(&path)?.next().is_none() {
+                    let _ = fs::remove_dir(&path);
+                }
+            } else {
+                if let Ok(rel_path) = path.strip_prefix(base_dir) {
+                    let rel_path_str = rel_path.to_string_lossy().into_owned();
+                    let normalized_path = rel_path_str.replace('\\', "/");
+
+                    // Skip the updater's own metadata files
+                    if normalized_path == "version.json" || normalized_path == "manifest.json" {
+                        continue;
+                    }
+
+                    // If it's not in the manifest, it's an unknown file or symlink
+                    if !manifest.files.contains_key(&normalized_path) && !manifest.files.contains_key(&rel_path_str) {
+                        // Try to delete. If it fails, add to the locked files list
+                        if let Err(_) = fs::remove_file(&path) {
+                            locked_files.push(path.clone());
+                        }
+                    }
+                }
+            }
+        }
+        Ok(locked_files)
+    }
+
     /// Verify the integrity of a locally installed product against its manifest
-    pub async fn repair_installation<F>(&self, product_name: &str, version: &str, on_progress: F) -> Result<()>
+    /// Returns a list of unknown files that could not be removed
+    pub async fn repair_installation<F>(&self, product_name: &str, version: &str, on_progress: F) -> Result<Vec<PathBuf>>
     where
         F: Fn(usize, usize) + Send + Sync + 'static,
     {
@@ -328,6 +377,10 @@ impl ProductUpdater {
         let product_dir = self.install_dir.join(product_name);
 
         if !product_dir.exists() { return Err(anyhow::anyhow!("Product directory does not exist.")); }
+
+        // Remove any files not tracked by the manifest
+        let locked_unknown_files = Self::remove_unknown_files(&product_dir, &product_dir, &manifest)
+            .context("Failed to perform cleanup of unknown files during repair")?;
 
         let temp_dir = self.install_dir.join(".temp");
         fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
@@ -344,7 +397,7 @@ impl ProductUpdater {
 
         result?;
 
-        Ok(())
+        Ok(locked_unknown_files)
     }
 }
 

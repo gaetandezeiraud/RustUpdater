@@ -165,8 +165,19 @@ pub(crate) async fn repair_installation(
     let progress_callback = create_progress_callback(app.clone());
 
     match updater.repair_installation(&product_name, &version, progress_callback).await {
-        Ok(_) => {
+        Ok(locked_files) => {
             info!("Repair complete! All files for {} are now 100% correct.", product_name);
+
+            if !locked_files.is_empty() {
+                warn!(
+                    "Repair completed, but could not remove {} unknown files because they were locked:",
+                    locked_files.len()
+                );
+                for file in locked_files {
+                    warn!("  - {}", file.display());
+                }
+            }
+
             Ok("Success".to_string())
         }
         Err(e) => {
