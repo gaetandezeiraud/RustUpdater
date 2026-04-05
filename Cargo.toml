@@ -2,6 +2,7 @@
 members = [
     "patcher_cli",
     "updater",
+    "update_manager",
     "launcher/src-tauri"
 ]
 

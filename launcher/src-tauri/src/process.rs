@@ -27,7 +27,7 @@ use std::env;
 use std::time::Duration;
 use sysinfo::System;
 use tauri_plugin_log::log::{debug, warn};
-use updater::models::Manifest;
+use update_manager::models::Manifest;
 
 /// Checks if a specific executable is currently running
 pub(crate) fn is_process_running(exe_name: &str) -> bool {

@@ -24,8 +24,8 @@ SOFTWARE.
 use std::path::PathBuf;
 use std::sync::Mutex;
 use serde::Serialize;
-use updater::models::RootJson;
-use updater::ProductUpdater;
+use update_manager::models::RootJson;
+use update_manager::UpdateManager;
 
 pub(crate) struct UpdaterConfig {
     pub(crate) server_url: Mutex<String>,
@@ -53,11 +53,11 @@ pub(crate) struct AppStateResponse {
     offline: bool,
 }
 
-pub(crate) fn build_app_state_response(updater: &ProductUpdater, root: RootJson, is_offline: bool) -> AppStateResponse {
+pub(crate) fn build_app_state_response(manager: &UpdateManager, root: RootJson, is_offline: bool) -> AppStateResponse {
     let mut products_state = std::collections::BTreeMap::new();
 
     for (name, entry) in root.products {
-        let local_ver = updater.get_local_version(&name);
+        let local_ver = manager.get_local_version(&name);
 
         products_state.insert(name, ProductState {
             latest_version: entry.latest_version,

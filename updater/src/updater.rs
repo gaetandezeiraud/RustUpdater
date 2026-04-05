@@ -112,99 +112,61 @@ impl ProductUpdater {
         RootJson::default() // Return empty if no cache exists, at very first launch
     }
 
-    /// Initiates an update to a specific target version.
-    /// It calculates the optimal sequential patch path based on the root.json versions array.
+    /// Core update engine. Synchronizes files based on pre-resolved manifests.
+    ///
+    /// # Arguments
+    /// * `product_name`     - The name of the product being updated.
+    /// * `target_manifest`  - The final desired state of the installation.
+    /// * `update_manifests` - An ordered patch chain to apply sequentially.
+    ///   Pass a **non-empty** vec to use the patch strategy.
+    ///   Pass an **empty** vec to force a full download of `target_manifest`.
     pub async fn perform_update<F>(
         &self,
         product_name: &str,
-        target_version: &str,
-        available_versions: &[String],
+        target_manifest: &Manifest,
+        update_manifests: Vec<Manifest>,
         on_progress: F,
     ) -> Result<()>
     where
         F: Fn(usize, usize) + Send + Sync + Clone + 'static,
     {
-        let current_version = self.get_local_version(product_name).unwrap_or_else(|| "0.0.0".to_string());
-        if current_version == target_version { return Ok(()); } // Already up to date
-
-        // Calculate the update path
-        let mut update_path = Vec::new();
-        if let Some(current_idx) = available_versions.iter().position(|v| v == &current_version) {
-            if let Some(target_idx) = available_versions.iter().position(|v| v == target_version) {
-                if current_idx < target_idx {
-                    // Get all versions AFTER current up to the target
-                    update_path = available_versions[current_idx + 1..=target_idx].to_vec();
-                }
-            }
+        // Already up to date?
+        if self.get_local_version(product_name).as_deref() == Some(target_manifest.version.as_str()) {
+            return Ok(());
         }
-
-        // If sequential path calculation failed (e.g., fresh install or downgrade),
-        // just target the final version directly for a full download.
-        if update_path.is_empty() {
-            update_path = vec![target_version.to_string()];
-        }
-
-        self.perform_update_path(product_name, &update_path, on_progress).await
-    }
-
-    /// Internal method that executes the determined update path
-    async fn perform_update_path<F>(
-        &self,
-        product_name: &str,
-        update_path: &[String],
-        on_progress: F,
-    ) -> Result<()>
-    where
-        F: Fn(usize, usize) + Send + Sync + Clone + 'static,
-    {
-        let target_version = update_path.last().expect("update_path is guaranteed non-empty");
-        let target_manifest = self.fetch_manifest(product_name, target_version).await?;
 
         let product_dir = self.install_dir.join(product_name);
         fs::create_dir_all(&product_dir).context("Failed to create product directory")?;
 
-        // Define and create a dynamic temp directory inside the install_dir
         let temp_dir = self.install_dir.join(".temp");
         fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
 
-        // Fetch all manifests in the update path
-        let mut manifests = Vec::new();
-        for ver in update_path {
-            if ver == target_version {
-                manifests.push(target_manifest.clone());
-            } else {
-                manifests.push(self.fetch_manifest(product_name, ver).await?);
-            }
-        }
+        let use_patches = !update_manifests.is_empty();
 
-        // Calculate the size of a complete full download of the target version
+        // Disk space pre-flight check
         let full_size: u64 = target_manifest.files.values().map(|e| e.size).sum();
-
-        // Calculate the cumulative cost of intermediate patches using the new struct field
-        let total_patch_cost: u64 = manifests.iter().map(|m| m.total_patch_size).sum();
-
-        // Find the size of the largest single file
+        let total_patch_cost: u64 = update_manifests.iter().map(|m| m.total_patch_size).sum();
         let largest_file_size: u64 = target_manifest.files.values().map(|f| f.size).max().unwrap_or(0);
-
-        // Check if space is available
         let is_installed = self.get_local_version(product_name).is_some();
 
         let required_space = if !is_installed {
-            // Scenario A: Fresh install. We need the full size + 100MB buffer
+            // Scenario A: Fresh install, need full size + 100 MB buffer.
             full_size + (100 * 1024 * 1024)
-        } else if total_patch_cost > 0 && total_patch_cost < full_size {
-            // Scenario B: Patching. We need space for the downloaded patches + room to write the largest temporary file
+        } else if use_patches {
+            // Scenario B: Patching, space for patches + largest single temp file + 100 MB buffer.
             total_patch_cost + largest_file_size + (100 * 1024 * 1024)
         } else {
-            // Scenario C: Update falling back to full downloads.
-            // It skips files that already exist, so we estimate space for the largest file to download + 1GB buffer.
+            // Scenario C: Full download fallback, space for the largest file + 1 GB buffer.
             largest_file_size + (1024 * 1024 * 1024)
         };
 
         let dir = self.install_dir.clone();
         let available_space = tokio::task::spawn_blocking(move || {
             fs4::available_space(&dir)
-        }).await.context("Thread panicked")?.context("Failed to read disk space")?;
+        })
+        .await
+        .context("Thread panicked")?
+        .context("Failed to read disk space")?;
 
         if available_space < required_space {
             return Err(anyhow::anyhow!(
@@ -214,34 +176,39 @@ impl ProductUpdater {
             ));
         }
 
-        // Calculate total files bytes for the progress bar across all manifests
-        let total_bytes: u64 = if total_patch_cost > 0 && total_patch_cost < full_size {
-            manifests.iter().flat_map(|m| m.files.values()).map(|f| f.size).sum()
+        // Total bytes for the progress bar
+        let total_bytes: u64 = if use_patches {
+            update_manifests.iter().flat_map(|m| m.files.values()).map(|f| f.size).sum()
         } else {
-            target_manifest.files.values().map(|f| f.size).sum()
+            full_size
         };
 
         let completed_bytes = Arc::new(AtomicI64::new(0));
 
-        // Evaluate strategy
-        // We only patch if the total patch cost is strictly less than a full download.
-        // Also if total_patch_cost is 0, it means no patches exist, so we force a full download.
         let update_result: Result<()> = async {
-            if total_patch_cost > 0 && total_patch_cost < full_size {
-                for manifest in manifests {
-                    self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, true, completed_bytes.clone(), total_bytes, on_progress.clone()).await?;
-                    // Save intermediate version progression in case of unexpected closure
+            if use_patches {
+                for manifest in &update_manifests {
+                    self.apply_manifest(
+                        product_name, manifest, &product_dir, &temp_dir,
+                        true, completed_bytes.clone(), total_bytes, on_progress.clone(),
+                    ).await?;
+                    // Commit this step: if the process is killed between two patch steps,
+                    // the next launch will resume from here rather than starting over.
                     Self::save_local_version(&product_dir, &manifest.version)?;
-                    Self::save_local_manifest(&product_dir, &manifest)?;
+                    // manifest.json (exe path, etc.) is written by the caller once the full
+                    // chain completes successfully — no need to update it on every intermediate step.
                 }
             } else {
-                // Apply the final manifest directly with patching disabled to force a fresh download
-                self.apply_manifest(product_name, &target_manifest, &product_dir, &temp_dir, false, completed_bytes, total_bytes, on_progress).await?;
-                Self::save_local_version(&product_dir, target_version)?;
-                Self::save_local_manifest(&product_dir, &target_manifest)?;
+                // Patching disabled: force a fresh download of any file with a wrong/missing hash
+                self.apply_manifest(
+                    product_name, target_manifest, &product_dir, &temp_dir,
+                    false, completed_bytes, total_bytes, on_progress,
+                ).await?;
+                Self::save_local_version(&product_dir, &target_manifest.version)?;
             }
             Ok(())
-        }.await;
+        }
+        .await;
 
         let _ = fs::remove_dir_all(&temp_dir);
 
@@ -313,21 +280,29 @@ impl ProductUpdater {
         Ok(())
     }
 
-    fn save_local_manifest(product_dir: &Path, manifest: &Manifest) -> Result<()> {
+    pub fn save_local_manifest(product_dir: &Path, manifest: &Manifest) -> Result<()> {
         let manifest_json = serde_json::to_string_pretty(manifest)?;
         fs::write(product_dir.join("manifest.json"), manifest_json).context("Failed to write manifest.json")?;
         Ok(())
     }
 
-    /// Verify the integrity of a locally installed product against its manifest
-    pub async fn repair_installation<F>(&self, product_name: &str, version: &str, on_progress: F) -> Result<()>
+    /// Verify the integrity of a locally installed product against a pre-fetched manifest.
+    ///
+    /// Forces a fresh download of any file whose hash does not match the manifest.
+    /// Files that are already correct are skipped.
+    pub async fn repair_installation<F>(
+        &self,
+        product_name: &str,
+        manifest: &Manifest,
+        on_progress: F,
+    ) -> Result<()>
     where
         F: Fn(usize, usize) + Send + Sync + 'static,
     {
-        let manifest = self.fetch_manifest(product_name, version).await?;
         let product_dir = self.install_dir.join(product_name);
-
-        if !product_dir.exists() { return Err(anyhow::anyhow!("Product directory does not exist.")); }
+        if !product_dir.exists() {
+            return Err(anyhow::anyhow!("Product directory does not exist."));
+        }
 
         let temp_dir = self.install_dir.join(".temp");
         fs::create_dir_all(&temp_dir).context("Failed to create temp directory")?;
@@ -335,9 +310,14 @@ impl ProductUpdater {
         let total_bytes: u64 = manifest.files.values().map(|f| f.size).sum();
         let completed_bytes = Arc::new(AtomicI64::new(0));
 
-        // Apply the manifest with patching disabled to force a fresh download of any corrupted files.
-        // Skips files with a matching hash.
-        let result = self.apply_manifest(product_name, &manifest, &product_dir, &temp_dir, false, completed_bytes, total_bytes, on_progress).await;
+        // Patching disabled: forces a fresh download of any corrupted/missing file.
+        // Files with a matching hash are skipped.
+        let result = self
+            .apply_manifest(
+                product_name, manifest, &product_dir, &temp_dir,
+                false, completed_bytes, total_bytes, on_progress,
+            )
+            .await;
 
         // Always clean the temp dir
         let _ = fs::remove_dir_all(&temp_dir);

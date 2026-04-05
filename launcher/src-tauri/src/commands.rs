@@ -24,8 +24,8 @@ SOFTWARE.
 use std::process::Command;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_log::log::{debug, error, info, warn};
-use updater::models::Manifest;
-use updater::ProductUpdater;
+use update_manager::models::Manifest;
+use update_manager::UpdateManager;
 use crate::process::{get_local_exe_name, is_process_running, kill_process};
 use crate::state::{build_app_state_response, AppStateResponse, ProgressPayload, UpdaterConfig};
 
@@ -54,7 +54,7 @@ pub(crate) async fn get_cached_app_state(state: tauri::State<'_, UpdaterConfig>)
         "Internal state error".to_string()
     })?.clone();
 
-    let updater = ProductUpdater::new(&url, dir);
+    let updater = UpdateManager::new(&url, dir);
     let root = updater.get_cached_root();
 
     Ok(build_app_state_response(&updater, root, true))
@@ -72,7 +72,7 @@ pub(crate) async fn get_app_state(state: tauri::State<'_, UpdaterConfig>) -> Res
         "Internal state error".to_string()
     })?.clone();
 
-    let updater = ProductUpdater::new(&url, dir);
+    let updater = UpdateManager::new(&url, dir);
     let (root, is_offline) = updater.fetch_root().await.map_err(|e| {
         warn!("Failed to fetch root state: {}", e);
         e.to_string()
@@ -109,27 +109,26 @@ pub(crate) async fn run_update(
         }
     }
 
-    let updater = ProductUpdater::new(&url, dir);
+    let manager = UpdateManager::new(&url, dir);
     info!("Starting update for {} to v{}...", product_name, target_version);
 
     let progress_callback = create_progress_callback(app.clone());
 
-    match updater.perform_update(&product_name, &target_version, &available_versions, progress_callback).await {
-        Ok(_) => {
-            // Create Windows registry entries and shortcuts
-            if let Some(exe_name) = get_local_exe_name(&product_dir) {
-                crate::process::add_windows_registry(&product_name, &product_dir, &exe_name, &target_version);
-                crate::process::create_start_menu_shortcut(&product_name, &product_dir, &exe_name);
-            }
-
-            info!("Update finished successfully for {}!", product_name);
-            Ok("Success".into())
-        }
-        Err(e) => {
+    manager.run_update(&product_name, &target_version, &available_versions, progress_callback)
+        .await
+        .map_err(|e| {
             error!("Update failed for {}: {}", product_name, e);
-            Err(format!("Update failed: {}", e))
-        }
+            format!("Update failed: {}", e)
+        })?;
+
+    // Platform-specific post-install (Windows registry + Start Menu shortcut)
+    if let Some(exe_name) = get_local_exe_name(&product_dir) {
+        crate::process::add_windows_registry(&product_name, &product_dir, &exe_name, &target_version);
+        crate::process::create_start_menu_shortcut(&product_name, &product_dir, &exe_name);
     }
+
+    info!("Update finished successfully for {}!", product_name);
+    Ok("Success".into())
 }
 
 #[tauri::command]
@@ -159,21 +158,21 @@ pub(crate) async fn repair_installation(
         }
     }
 
-    let updater = ProductUpdater::new(&url, dir);
+    let manager = UpdateManager::new(&url, dir);
     info!("Scanning and repairing files for {} v{}...", product_name, version);
 
     let progress_callback = create_progress_callback(app.clone());
 
-    match updater.repair_installation(&product_name, &version, progress_callback).await {
-        Ok(_) => {
+    manager.repair(&product_name, &version, progress_callback)
+        .await
+        .map(|_| {
             info!("Repair complete! All files for {} are now 100% correct.", product_name);
-            Ok("Success".to_string())
-        }
-        Err(e) => {
+            "Success".to_string()
+        })
+        .map_err(|e| {
             error!("Repair failed for {}: {}", product_name, e);
-            Err(format!("Repair failed: {}", e))
-        }
-    }
+            format!("Repair failed: {}", e)
+        })
 }
 
 #[tauri::command]
@@ -194,41 +193,34 @@ pub(crate) async fn launch_product(
     let product_dir = dir.join(&product_name);
     let manifest_path = product_dir.join("manifest.json");
 
-    let updater = ProductUpdater::new(&url, &dir);
+    let manager = UpdateManager::new(&url, &dir);
 
-    let local_ver = updater.get_local_version(&product_name).ok_or_else(|| {
+    let local_ver = manager.get_local_version(&product_name).ok_or_else(|| {
         warn!("Attempted to launch {} but it is not installed (version.json missing).", product_name);
         "Product is not installed (version.json missing)."
     })?;
 
     let manifest = if manifest_path.exists() {
-        // Read the local manifest instantly
         let manifest_data = std::fs::read_to_string(&manifest_path).map_err(|e| {
             error!("Failed to read local manifest for {}: {}", product_name, e);
             format!("Failed to read local manifest: {}", e)
         })?;
-
-        let local_manifest: Manifest = serde_json::from_str(&manifest_data).map_err(|e| {
+        serde_json::from_str::<Manifest>(&manifest_data).map_err(|e| {
             error!("Failed to parse local manifest for {}: {}", product_name, e);
             format!("Failed to parse local manifest: {}", e)
-        })?;
-
-        local_manifest
+        })?
     } else {
-        // Missing local manifest, fetch it, block the launch, and save it
         info!("Local manifest missing for {}, fetching from server...", product_name);
-        let fetched_manifest = updater.fetch_manifest(&product_name, &local_ver).await.map_err(|e| {
+        let fetched = manager.fetch_manifest(&product_name, &local_ver).await.map_err(|e| {
             error!("Offline manifest missing, and failed to fetch from server for {}: {}", product_name, e);
             format!("Offline manifest missing, and failed to fetch from server: {}", e)
         })?;
-
-        if let Ok(manifest_json) = serde_json::to_string_pretty(&fetched_manifest) {
-            if let Err(e) = std::fs::write(&manifest_path, manifest_json) {
+        if let Ok(json) = serde_json::to_string_pretty(&fetched) {
+            if let Err(e) = std::fs::write(&manifest_path, json) {
                 warn!("Fetched manifest for {}, but failed to save it locally: {}", product_name, e);
             }
         }
-
-        fetched_manifest
+        fetched
     };
 
     if manifest.exe.is_empty() {
