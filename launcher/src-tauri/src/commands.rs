@@ -30,14 +30,14 @@ use crate::process::{get_local_exe_name, is_process_running, kill_process};
 use crate::state::{build_app_state_response, AppStateResponse, ProgressPayload, UpdaterConfig};
 
 /// Helper to create a standardized progress callback for the updater
-fn create_progress_callback(app: AppHandle) -> impl Fn(usize, usize) + Send + Sync + Clone + 'static {
+fn create_progress_callback(app: AppHandle, product_name: String) -> impl Fn(usize, usize) + Send + Sync + Clone + 'static {
     move |current: usize, total: usize| {
         let percent = if total > 0 {
             (current as f64 / total as f64) * 100.0
         } else {
             100.0
         };
-        let payload = ProgressPayload { current, total, percent };
+        let payload = ProgressPayload { product_name: product_name.clone(), current, total, percent };
         let _ = app.emit("progress", payload);
     }
 }
@@ -109,25 +109,49 @@ pub(crate) async fn run_update(
         }
     }
 
-    let updater = ProductUpdater::new(&url, dir);
+    // Setup cancellation channel
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut lock = state.cancel_tx.lock().map_err(|_| "Internal state error".to_string())?;
+        *lock = Some(cancel_tx);
+    }
+
+    let updater = ProductUpdater::new(&url, dir.clone());
     info!("Starting update for {} to v{}...", product_name, target_version);
 
-    let progress_callback = create_progress_callback(app.clone());
+    let progress_callback = create_progress_callback(app.clone(), product_name.clone());
+    let temp_dir = dir.join(".temp");
 
-    match updater.perform_update(&product_name, &target_version, &available_versions, progress_callback).await {
-        Ok(_) => {
-            // Create Windows registry entries and shortcuts
-            if let Some(exe_name) = get_local_exe_name(&product_dir) {
-                crate::process::add_windows_registry(&product_name, &product_dir, &exe_name, &target_version);
-                crate::process::create_start_menu_shortcut(&product_name, &product_dir, &exe_name);
+    let update_future = updater.perform_update(&product_name, &target_version, &available_versions, progress_callback);
+
+    tokio::select! {
+        result = update_future => {
+            let _ = state.cancel_tx.lock().map(|mut l| l.take());
+            match result {
+                Ok(_) => {
+                    if let Some(exe_name) = get_local_exe_name(&product_dir) {
+                        crate::process::add_windows_registry(&product_name, &product_dir, &exe_name, &target_version);
+                        crate::process::create_start_menu_shortcut(&product_name, &product_dir, &exe_name);
+                    }
+                    info!("Update finished successfully for {}!", product_name);
+                    Ok("Success".into())
+                }
+                Err(e) => {
+                    error!("Update failed for {}: {}", product_name, e);
+                    Err(format!("Update failed: {}", e))
+                }
             }
-
-            info!("Update finished successfully for {}!", product_name);
-            Ok("Success".into())
         }
-        Err(e) => {
-            error!("Update failed for {}: {}", product_name, e);
-            Err(format!("Update failed: {}", e))
+        _ = cancel_rx => {
+            warn!("Installation for {} was cancelled by user.", product_name);
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            // Fresh install (no version.json yet) => clean up the partial product directory.
+            // Update (version.json already exists) => leave the existing install untouched.
+            // But it is not possible to cancel an update.
+            if !product_dir.join("version.json").exists() {
+                let _ = std::fs::remove_dir_all(&product_dir);
+            }
+            Err("CANCELLED".to_string())
         }
     }
 }
@@ -159,20 +183,59 @@ pub(crate) async fn repair_installation(
         }
     }
 
-    let updater = ProductUpdater::new(&url, dir);
+    // Setup cancellation channel
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel::<()>();
+    {
+        let mut lock = state.cancel_tx.lock().map_err(|_| "Internal state error".to_string())?;
+        *lock = Some(cancel_tx);
+    }
+
+    let updater = ProductUpdater::new(&url, dir.clone());
     info!("Scanning and repairing files for {} v{}...", product_name, version);
 
-    let progress_callback = create_progress_callback(app.clone());
+    let progress_callback = create_progress_callback(app.clone(), product_name.clone());
+    let temp_dir = dir.join(".temp");
 
-    match updater.repair_installation(&product_name, &version, progress_callback).await {
-        Ok(_) => {
-            info!("Repair complete! All files for {} are now 100% correct.", product_name);
-            Ok("Success".to_string())
+    let repair_future = updater.repair_installation(&product_name, &version, progress_callback);
+
+    tokio::select! {
+        result = repair_future => {
+            let _ = state.cancel_tx.lock().map(|mut l| l.take());
+            match result {
+                Ok(_) => {
+                    info!("Repair complete! All files for {} are now 100% correct.", product_name);
+                    Ok("Success".to_string())
+                }
+                Err(e) => {
+                    error!("Repair failed for {}: {}", product_name, e);
+                    Err(format!("Repair failed: {}", e))
+                }
+            }
         }
-        Err(e) => {
-            error!("Repair failed for {}: {}", product_name, e);
-            Err(format!("Repair failed: {}", e))
+        _ = cancel_rx => {
+            warn!("Repair for {} was cancelled by user.", product_name);
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            Err("CANCELLED".to_string())
         }
+    }
+}
+
+/// Cancel the currently running update or repair operation
+#[tauri::command]
+pub(crate) async fn cancel_update(
+    state: tauri::State<'_, UpdaterConfig>,
+) -> Result<String, String> {
+    let tx = state.cancel_tx.lock()
+        .map_err(|_| "Internal state error".to_string())?
+        .take();
+
+    if let Some(tx) = tx {
+        let _ = tx.send(());
+        info!("Cancel signal sent to active operation.");
+        Ok("Cancel signal sent".into())
+    } else {
+        warn!("cancel_update called but no active operation found.");
+        Err("No active operation to cancel".into())
     }
 }
 

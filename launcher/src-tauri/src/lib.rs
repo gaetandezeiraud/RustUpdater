@@ -67,6 +67,7 @@ pub fn run() {
         .manage(UpdaterConfig {
             server_url: Mutex::new(default_url),
             install_dir: Mutex::new(default_install_dir),
+            cancel_tx: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             get_startup_intent,
@@ -76,7 +77,8 @@ pub fn run() {
             repair_installation,
             launch_product,
             uninstall_product,
-            force_kill_product
+            force_kill_product,
+            cancel_update
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

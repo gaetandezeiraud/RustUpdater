@@ -24,16 +24,19 @@ SOFTWARE.
 use std::path::PathBuf;
 use std::sync::Mutex;
 use serde::Serialize;
+use tokio::sync::oneshot;
 use updater::models::RootJson;
 use updater::ProductUpdater;
 
 pub(crate) struct UpdaterConfig {
     pub(crate) server_url: Mutex<String>,
     pub(crate) install_dir: Mutex<PathBuf>,
+    pub(crate) cancel_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
 
 #[derive(Clone, Serialize)]
 pub(crate) struct ProgressPayload {
+    pub(crate) product_name: String,
     pub(crate) current: usize,
     pub(crate) total: usize,
     pub(crate) percent: f64,
